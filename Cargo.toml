@@ -1,0 +1,45 @@
+[package]
+name = "workcell"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "A sandboxed, git-backed workspace for running untrusted coding agents."
+repository = "https://github.com/ernestas-poskus/workcell"
+documentation = "https://docs.rs/workcell"
+readme = "README.md"
+keywords = ["agent", "sandbox", "git", "worktree", "process"]
+categories = ["development-tools", "filesystem"]
+
+# Its own workspace: the crate is domain-agnostic and is meant to stand alone (its own
+# lockfile, README, LICENSE, and CI), while a consumer can use it as a path dependency.
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "process",
+  "time",
+  "macros",
+  "sync",
+  "fs",
+  "io-util",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.11"
+git2 = { version = "0.21", default-features = false, features = [
+  "vendored-libgit2",
+  "ssh",
+  "https",
+  "vendored-openssl",
+] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[package.metadata.docs.rs]
+all-features = true

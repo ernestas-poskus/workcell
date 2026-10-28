@@ -1,0 +1,107 @@
+{
+  "$schema": "https://nono.sh/schemas/nono-profile.schema.json",
+  "meta": {
+    "name": "workcell-review",
+    "description": "workcell review run: read-only checkout, toolchain and harness configuration (including the harness credential it must authenticate with), host credentials and repository instruction files denied. The checkout is never writable, so a review cannot commit or edit; only the named harness state (session databases, logs, caches) is writable so the CLI can start, and configuration stays unwritable so a review cannot persist a hook.",
+    "author": "workcell"
+  },
+  "extends": "default",
+  "groups": {
+    "include": [
+      "rust_runtime",
+      "node_runtime",
+      "user_tools",
+      "git_config",
+      "homebrew_macos",
+      "homebrew_linux"
+    ]
+  },
+  "network": {
+    "block": false,
+    "allow_domain": [
+      "accounts.google.com",
+      "api.anthropic.com",
+      "api.openai.com",
+      "auth.openai.com",
+      "cdn.openai.com",
+      "chatgpt.com",
+      "claude.ai",
+      "clients6.google.com",
+      "cloudcode-pa.googleapis.com",
+      "console.anthropic.com",
+      "daily-cloudcode-pa.googleapis.com",
+      "fonts.gstatic.com",
+      "generativelanguage.googleapis.com",
+      "oauth2.googleapis.com",
+      "play.googleapis.com",
+      "statsig.anthropic.com",
+      "www.googleapis.com",
+      "www.gstatic.com"
+    ]
+  },
+  "workdir": {
+    "access": "read"
+  },
+  "filesystem": {
+    "allow": [
+      "$HOME/.gemini/antigravity-cli/cache",
+      "$HOME/.gemini/antigravity-cli/conversations",
+      "$HOME/.gemini/antigravity-cli/crashes",
+      "$HOME/.gemini/antigravity-cli/log",
+      "$HOME/.gemini/antigravity-cli/scratch",
+      "$HOME/.gemini/antigravity-cli/presence",
+      "$HOME/.gemini/antigravity-cli/knowledge",
+      "$HOME/.gemini/antigravity-cli/implicit",
+      "$HOME/.gemini/antigravity-cli/annotations",
+      "$HOME/.gemini/antigravity-cli/brain",
+      "$HOME/.gemini/history"
+    ],
+    "allow_file": [
+      "$HOME/.gemini/state.json",
+      "$HOME/.gemini/antigravity-cli/antigravity-oauth-token",
+      "$HOME/.gemini/antigravity-cli/history.jsonl",
+      "$HOME/.gemini/antigravity-cli/conversation_summaries.db",
+      "$HOME/.gemini/antigravity-cli/jetski_state.pbtxt",
+      "$HOME/.gemini/antigravity-cli/last_check.timestamp"
+    ],
+    "read": [
+      "$HOME/.cargo",
+      "$HOME/.rustup",
+      "$HOME/.local/bin",
+      "$HOME/.claude",
+      "$HOME/.claude.json",
+      "$HOME/.codex",
+      "$HOME/.gemini",
+      "$HOME/.antigravity",
+      "$HOME/.grok",
+      "$HOME/.dsh",
+      "$HOME/Library/Keychains/login.keychain-db",
+      "$HOME/Library/Keychains/metadata.keychain-db"
+    ],
+    "bypass_protection": [
+      "$HOME/Library/Keychains/login.keychain-db",
+      "$HOME/Library/Keychains/metadata.keychain-db"
+    ],
+    "deny": [
+      "$WORKDIR/**/AGENTS.md",
+      "$WORKDIR/**/CLAUDE.md",
+      "$WORKDIR/**/GEMINI.md",
+      "$WORKDIR/**/.cursorrules",
+      "$WORKDIR/**/.mcp.json",
+      "$WORKDIR/**/.claude/**",
+      "$WORKDIR/**/.codex/**",
+      "$WORKDIR/**/.cursor/**",
+      "$WORKDIR/**/.gemini/**",
+      "$WORKDIR/**/.grok/**",
+      "$WORKDIR/**/.agents/**",
+      "$WORKDIR/__STATE_DIR__/state.json",
+      "$WORKDIR/__STATE_DIR__/logs",
+      "$WORKDIR/__STATE_DIR__/runs/*.log",
+      "$WORKDIR/__STATE_DIR__/control",
+      "$WORKDIR/__STATE_DIR__/sandbox",
+      "$WORKDIR/__STATE_DIR__/integration.lock",
+      "$HOME/.config/gh",
+      "$HOME/.cargo/credentials.toml"
+    ]
+  }
+}

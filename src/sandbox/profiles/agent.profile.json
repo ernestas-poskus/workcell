@@ -1,0 +1,120 @@
+{
+  "$schema": "https://nono.sh/schemas/nono-profile.schema.json",
+  "meta": {
+    "name": "workcell-agent",
+    "description": "workcell agent run: writable checkout, read-only harness configuration, toolchain caches writable, host credentials and repository instruction files denied. The harness configuration is read-only on purpose: a hook, notify command, MCP server, or plugin planted in ~/.claude/settings.json, ~/.codex/config.toml, ~/.grok/config.toml, or ~/.gemini/antigravity-cli/settings.json would execute in the human's next session, outside this sandbox. Only the named harness state directories (session history, logs, crash reports, caches) and the harness's own credentials are writable. Loopback is not granted here: a caller that needs an arbitrary-port bind (measured: claude, agy) grants it per run. Package caches are read-only, because a warm offline build wrote nothing to them.",
+    "author": "workcell"
+  },
+  "extends": "default",
+  "groups": {
+    "include": [
+      "rust_runtime",
+      "node_runtime",
+      "user_tools",
+      "git_config",
+      "homebrew_macos",
+      "homebrew_linux"
+    ]
+  },
+  "network": {
+    "block": false,
+    "allow_domain": [
+      "accounts.google.com",
+      "api.anthropic.com",
+      "api.openai.com",
+      "auth.openai.com",
+      "cdn.openai.com",
+      "chatgpt.com",
+      "claude.ai",
+      "clients6.google.com",
+      "cloudcode-pa.googleapis.com",
+      "console.anthropic.com",
+      "daily-cloudcode-pa.googleapis.com",
+      "fonts.gstatic.com",
+      "generativelanguage.googleapis.com",
+      "oauth2.googleapis.com",
+      "play.googleapis.com",
+      "statsig.anthropic.com",
+      "www.googleapis.com",
+      "www.gstatic.com"
+    ]
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "allow": [
+      "$WORKDIR",
+      "$HOME/.cache",
+      "$HOME/.claude/projects",
+      "$HOME/.claude/todos",
+      "$HOME/.claude/shell-snapshots",
+      "$HOME/.claude/statsig",
+      "$HOME/.claude/debug",
+      "$HOME/.grok/sessions",
+      "$HOME/.grok/log",
+      "$HOME/.grok/crash",
+      "$HOME/.gemini/antigravity-cli/cache",
+      "$HOME/.gemini/antigravity-cli/conversations",
+      "$HOME/.gemini/antigravity-cli/crashes",
+      "$HOME/.gemini/antigravity-cli/log",
+      "$HOME/.gemini/antigravity-cli/scratch",
+      "$HOME/.gemini/antigravity-cli/presence",
+      "$HOME/.gemini/antigravity-cli/knowledge",
+      "$HOME/.gemini/antigravity-cli/implicit",
+      "$HOME/.gemini/antigravity-cli/annotations",
+      "$HOME/.gemini/antigravity-cli/brain",
+      "$HOME/.gemini/history"
+    ],
+    "allow_file": [
+      "$HOME/.cargo/.package-cache",
+      "$HOME/.gemini/state.json",
+      "$HOME/.gemini/antigravity-cli/antigravity-oauth-token",
+      "$HOME/.gemini/antigravity-cli/history.jsonl",
+      "$HOME/.gemini/antigravity-cli/conversation_summaries.db",
+      "$HOME/.gemini/antigravity-cli/jetski_state.pbtxt",
+      "$HOME/.gemini/antigravity-cli/last_check.timestamp"
+    ],
+    "read": [
+      "$HOME/.cargo",
+      "$HOME/.cargo/registry",
+      "$HOME/.cargo/git",
+      "$HOME/.rustup",
+      "$HOME/.local/bin",
+      "$HOME/.claude",
+      "$HOME/.claude.json",
+      "$HOME/.codex",
+      "$HOME/.gemini",
+      "$HOME/.antigravity",
+      "$HOME/.grok",
+      "$HOME/.dsh",
+      "$HOME/Library/Keychains/login.keychain-db",
+      "$HOME/Library/Keychains/metadata.keychain-db"
+    ],
+    "bypass_protection": [
+      "$HOME/Library/Keychains/login.keychain-db",
+      "$HOME/Library/Keychains/metadata.keychain-db"
+    ],
+    "deny": [
+      "$WORKDIR/**/AGENTS.md",
+      "$WORKDIR/**/CLAUDE.md",
+      "$WORKDIR/**/GEMINI.md",
+      "$WORKDIR/**/.cursorrules",
+      "$WORKDIR/**/.mcp.json",
+      "$WORKDIR/**/.claude/**",
+      "$WORKDIR/**/.codex/**",
+      "$WORKDIR/**/.cursor/**",
+      "$WORKDIR/**/.gemini/**",
+      "$WORKDIR/**/.grok/**",
+      "$WORKDIR/**/.agents/**",
+      "$WORKDIR/__STATE_DIR__/state.json",
+      "$WORKDIR/__STATE_DIR__/logs",
+      "$WORKDIR/__STATE_DIR__/runs/*.log",
+      "$WORKDIR/__STATE_DIR__/control",
+      "$WORKDIR/__STATE_DIR__/sandbox",
+      "$WORKDIR/__STATE_DIR__/integration.lock",
+      "$HOME/.config/gh",
+      "$HOME/.cargo/credentials.toml"
+    ]
+  }
+}
