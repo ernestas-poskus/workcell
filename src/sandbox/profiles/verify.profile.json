@@ -1,0 +1,55 @@
+{
+  "$schema": "https://nono.sh/schemas/nono-profile.schema.json",
+  "meta": {
+    "name": "workcell-verify",
+    "description": "workcell verification run: the repository's configured verification commands, with a writable checkout so a build can write its target directory, network denied, no harness configuration or credentials, no keychain, and read-only package caches. The checkout is already agent-written; the purpose of this profile is that a verification command cannot reach the network or the operator's credentials. A deployment whose verification genuinely needs a network host adds it to this profile deliberately (a reviewed change), never through a runtime switch.",
+    "author": "workcell"
+  },
+  "extends": "default",
+  "groups": {
+    "include": [
+      "rust_runtime",
+      "node_runtime",
+      "user_tools",
+      "git_config",
+      "homebrew_macos",
+      "homebrew_linux"
+    ]
+  },
+  "network": {
+    "block": true
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "read": [
+      "$HOME/.cargo",
+      "$HOME/.cargo/registry",
+      "$HOME/.cargo/git",
+      "$HOME/.rustup",
+      "$HOME/.local/bin"
+    ],
+    "deny": [
+      "$WORKDIR/**/AGENTS.md",
+      "$WORKDIR/**/CLAUDE.md",
+      "$WORKDIR/**/GEMINI.md",
+      "$WORKDIR/**/.cursorrules",
+      "$WORKDIR/**/.mcp.json",
+      "$WORKDIR/**/.claude/**",
+      "$WORKDIR/**/.codex/**",
+      "$WORKDIR/**/.cursor/**",
+      "$WORKDIR/**/.gemini/**",
+      "$WORKDIR/**/.grok/**",
+      "$WORKDIR/**/.agents/**",
+      "$WORKDIR/__STATE_DIR__/state.json",
+      "$WORKDIR/__STATE_DIR__/logs",
+      "$WORKDIR/__STATE_DIR__/runs/*.log",
+      "$WORKDIR/__STATE_DIR__/control",
+      "$WORKDIR/__STATE_DIR__/sandbox",
+      "$WORKDIR/__STATE_DIR__/integration.lock",
+      "$HOME/.config/gh",
+      "$HOME/.cargo/credentials.toml"
+    ]
+  }
+}

@@ -27,6 +27,7 @@ use workcell::worktree::Worktree;
 
 const AGENT_PROFILE: &str = include_str!("../src/sandbox/profiles/agent.profile.json");
 const REVIEW_PROFILE: &str = include_str!("../src/sandbox/profiles/review.profile.json");
+const VERIFY_PROFILE: &str = include_str!("../src/sandbox/profiles/verify.profile.json");
 
 /// The token the embedded profiles use for the caller's in-checkout state directory.
 const STATE_DIR_TOKEN: &str = "__STATE_DIR__";
@@ -123,7 +124,7 @@ const AGENT_ALLOW_FILE: &[&str] = &[
     "$HOME/.gemini/antigravity-cli/last_check.timestamp",
 ];
 
-/// The keychain files the agent profile reads through `bypass_protection`.
+/// The keychain files a caller may grant per run; the profiles must not carry them.
 const KEYCHAIN_FILES: [&str; 2] = [
     "$HOME/Library/Keychains/login.keychain-db",
     "$HOME/Library/Keychains/metadata.keychain-db",
@@ -422,10 +423,12 @@ fn the_agent_profile_grants_the_checkout_and_denies_the_escape_paths() {
              caller's next unsandboxed build"
         );
     }
-    for required in [
-        "$HOME/.cargo",
-        "$HOME/.rustup",
-        "$HOME/.local/bin",
+    for required in ["$HOME/.cargo", "$HOME/.rustup", "$HOME/.local/bin"] {
+        assert_contains(&profile.filesystem.read, required);
+    }
+    // Harness configuration and credentials are caller-supplied per run, never profile grants:
+    // that is what stops a codex child from reading Claude's configuration or keychain.
+    for forbidden in [
         "$HOME/.claude",
         "$HOME/.claude.json",
         "$HOME/.codex",
@@ -434,7 +437,10 @@ fn the_agent_profile_grants_the_checkout_and_denies_the_escape_paths() {
         "$HOME/.grok",
         "$HOME/.dsh",
     ] {
-        assert_contains(&profile.filesystem.read, required);
+        assert!(
+            !profile.filesystem.read.iter().any(|path| path == forbidden),
+            "harness path `{forbidden}` must be granted by the caller, not the profile"
+        );
     }
     // Codex state is granted per run by the caller (CODEX_HOME), never by the static profile: the
     // operator's ~/.codex is not writable at all.
@@ -456,9 +462,9 @@ fn the_agent_profile_grants_the_checkout_and_denies_the_escape_paths() {
         "the profile must not grant a shared codex state file: {:?}",
         profile.filesystem.allow_file
     );
-    // Harness configuration is readable so the CLI can start, and never writable: a planted hook
-    // in `~/.claude/settings.json` or `~/.codex/config.toml` executes in the human's next session,
-    // outside this sandbox. Session state is the only writable part.
+    // Harness configuration is never writable: a planted hook in `~/.claude/settings.json` or
+    // `~/.codex/config.toml` executes in the human's next session, outside this sandbox. Session
+    // state is the only writable part.
     for config in [
         "$HOME/.claude",
         "$HOME/.claude.json",
@@ -471,9 +477,16 @@ fn the_agent_profile_grants_the_checkout_and_denies_the_escape_paths() {
             profile.filesystem.allow
         );
     }
-    for required in KEYCHAIN_FILES {
-        assert_contains(&profile.filesystem.read, required);
-        assert_contains(&profile.filesystem.bypass_protection, required);
+    assert!(
+        profile.filesystem.bypass_protection.is_empty(),
+        "a protected file is named by the caller per run, not by the profile: {:?}",
+        profile.filesystem.bypass_protection
+    );
+    for forbidden in KEYCHAIN_FILES {
+        assert!(
+            !profile.filesystem.read.iter().any(|path| path == forbidden),
+            "the login keychain must be caller-supplied, not a profile grant: {forbidden}"
+        );
     }
     for required in REQUIRED_DENIES {
         assert_contains(&profile.filesystem.deny, required);
@@ -500,18 +513,23 @@ fn the_review_profile_is_read_only_and_carries_the_same_denials() {
         "the review profile must not make the checkout writable: {:?}",
         review.filesystem.allow
     );
-    for required in [
-        "$HOME/.cargo",
-        "$HOME/.rustup",
-        "$HOME/.local/bin",
-        "$HOME/.claude",
-        "$HOME/.codex",
-    ] {
+    for required in ["$HOME/.cargo", "$HOME/.rustup", "$HOME/.local/bin"] {
         assert_contains(&review.filesystem.read, required);
     }
-    for required in KEYCHAIN_FILES {
-        assert_contains(&review.filesystem.read, required);
-        assert_contains(&review.filesystem.bypass_protection, required);
+    assert!(
+        review.filesystem.bypass_protection.is_empty(),
+        "the review profile must not grant a protection bypass: {:?}",
+        review.filesystem.bypass_protection
+    );
+    for forbidden in KEYCHAIN_FILES
+        .iter()
+        .copied()
+        .chain(["$HOME/.claude", "$HOME/.codex"])
+    {
+        assert!(
+            !review.filesystem.read.iter().any(|path| path == forbidden),
+            "harness and keychain path `{forbidden}` must be caller-supplied"
+        );
     }
     for required in REQUIRED_DENIES {
         assert_contains(&review.filesystem.deny, required);
@@ -584,8 +602,24 @@ async fn preflight_accepts_a_binary_newer_than_the_floor() {
     assert_eq!(subject.version(), Some("0.81.2"));
 }
 
+#[test]
+fn the_profile_address_is_versioned_against_the_scheme_and_nono_floor() {
+    // The address must not be a raw content hash: a scheme change (a different digest meaning) or
+    // a higher nono floor has to produce a different published name.
+    assert_ne!(
+        workcell::sandbox::profile_digest("{}"),
+        digest_hex(b"{}"),
+        "the address must cover the scheme and the nono floor, not only the bytes"
+    );
+    assert_eq!(
+        workcell::sandbox::profile_digest("{}"),
+        workcell::sandbox::profile_digest("{}"),
+        "the address is deterministic"
+    );
+}
+
 #[tokio::test]
-async fn preflight_publishes_both_profiles_content_addressed_and_unreadable_by_others() {
+async fn preflight_publishes_every_profile_content_addressed_and_unreadable_by_others() {
     let fake = FakeNono::new("0.80.0");
     let root = TempDir::new().expect("a temporary directory");
     let state = root.path().join("xdg-state");
@@ -602,12 +636,15 @@ async fn preflight_publishes_both_profiles_content_addressed_and_unreadable_by_o
     let again = Sandbox::resolve(&profile_dir).expect("a second resolve");
     assert_eq!(subject.agent_profile(), again.agent_profile());
     assert_eq!(subject.review_profile(), again.review_profile());
+    assert_eq!(subject.verify_profile(), again.verify_profile());
     again.preflight().await.expect("a second preflight");
 
     let agent = std::fs::read_to_string(subject.agent_profile()).expect("the agent profile");
     assert_eq!(agent, rendered(AGENT_PROFILE));
     let review = std::fs::read_to_string(subject.review_profile()).expect("the review profile");
     assert_eq!(review, rendered(REVIEW_PROFILE));
+    let verify = std::fs::read_to_string(subject.verify_profile()).expect("the verify profile");
+    assert_eq!(verify, rendered(VERIFY_PROFILE));
 
     for (path, contents, suffix) in [
         (
@@ -620,16 +657,21 @@ async fn preflight_publishes_both_profiles_content_addressed_and_unreadable_by_o
             rendered(REVIEW_PROFILE),
             "-review.json",
         ),
+        (
+            subject.verify_profile(),
+            rendered(VERIFY_PROFILE),
+            "-verify.json",
+        ),
     ] {
         let name = path
             .file_name()
             .expect("a profile file name")
             .to_string_lossy();
         assert!(name.ends_with(suffix), "unexpected profile name {name}");
-        let digest = digest_hex(contents.as_bytes());
+        let digest = workcell::sandbox::profile_digest(&contents);
         assert!(
             name.starts_with(&digest[..16]),
-            "the profile name must be the sha256 content address of its rendered bytes: {name} vs {digest}"
+            "the profile name must be the versioned content address of its rendered bytes: {name} vs {digest}"
         );
         assert_eq!(
             name.len(),
@@ -655,8 +697,8 @@ async fn preflight_publishes_both_profiles_content_addressed_and_unreadable_by_o
         .expect("the profile directory")
         .count();
     assert_eq!(
-        published, 2,
-        "exactly the two reviewed profiles are published"
+        published, 3,
+        "exactly the three reviewed profiles are published"
     );
 }
 
@@ -670,7 +712,11 @@ async fn the_default_published_profiles_deny_the_default_state_directory() {
     let subject = resolve(&fake, &root);
     subject.preflight().await.expect("preflight");
 
-    for path in [subject.agent_profile(), subject.review_profile()] {
+    for path in [
+        subject.agent_profile(),
+        subject.review_profile(),
+        subject.verify_profile(),
+    ] {
         let published = std::fs::read_to_string(path).expect("the published profile");
         assert!(
             published.contains(&format!("\"$WORKDIR/{DEFAULT_STATE_DIR}/state.json\"")),
@@ -766,11 +812,11 @@ async fn a_custom_state_directory_is_rendered_denied_and_content_addressed() {
         .expect("a profile file name")
         .to_string_lossy()
         .to_string();
-    let digest = digest_hex(published.as_bytes());
+    let digest = workcell::sandbox::profile_digest(&published);
     assert_eq!(
         &address[..16],
         &digest[..16],
-        "the name must still be the digest of the bytes nono will enforce"
+        "the name must be the versioned address of the bytes nono will enforce"
     );
     // The fake nono was asked to validate exactly the rendered file.
     let invocations = fake.recorded_invocations();
@@ -846,8 +892,8 @@ async fn preflight_probes_the_host_and_validates_the_agent_profile() {
     let invocations = fake.recorded_invocations();
     assert_eq!(
         invocations.len(),
-        4,
-        "resolve probes the version, then preflight runs the host probe and validates both published profiles: {invocations:?}"
+        5,
+        "resolve probes the version, then preflight runs the host probe and validates every published profile: {invocations:?}"
     );
     assert_eq!(invocations[0], vec!["--version".to_owned()]);
     assert_eq!(
@@ -868,6 +914,14 @@ async fn preflight_probes_the_host_and_validates_the_agent_profile() {
             "profile".to_owned(),
             "validate".to_owned(),
             subject.review_profile().display().to_string(),
+        ]
+    );
+    assert_eq!(
+        invocations[4],
+        vec![
+            "profile".to_owned(),
+            "validate".to_owned(),
+            subject.verify_profile().display().to_string(),
         ]
     );
 }
@@ -990,7 +1044,7 @@ fn worktree_under(root: &TempDir) -> Worktree {
     let git_common_dir = root.path().join("repo").join(".git");
     Worktree {
         path: root.path().join("checkout"),
-        branch: "agent/demo".to_owned(),
+        branch: "agent/demo/head".to_owned(),
         base_sha: "0".repeat(40),
         git_dir: git_common_dir.join("worktrees").join("demo"),
         git_common_dir,
@@ -1012,6 +1066,7 @@ fn wrap_agent_is_deterministic_and_grants_only_the_git_metadata() {
         read_files: vec![mcp.as_path()],
         loopback_ports: vec![8787, 9876],
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
 
@@ -1035,9 +1090,22 @@ fn wrap_agent_is_deterministic_and_grants_only_the_git_metadata() {
         "--allow".to_owned(),
         common.join("objects").display().to_string(),
         "--allow".to_owned(),
-        common.join("refs").display().to_string(),
+        common
+            .join("refs")
+            .join("heads")
+            .join("agent")
+            .join("demo")
+            .display()
+            .to_string(),
         "--allow".to_owned(),
-        common.join("logs").display().to_string(),
+        common
+            .join("logs")
+            .join("refs")
+            .join("heads")
+            .join("agent")
+            .join("demo")
+            .display()
+            .to_string(),
         "--allow".to_owned(),
         common.join("worktrees").join("demo").display().to_string(),
         "--read".to_owned(),
@@ -1061,16 +1129,80 @@ fn wrap_agent_is_deterministic_and_grants_only_the_git_metadata() {
         .filter(|(flag, _)| flag.as_str() == "--allow")
         .map(|(_, path)| path)
         .collect();
+    let refs_root = common.join("refs").display().to_string();
+    let logs_root = common.join("logs").display().to_string();
+    let run_ref = common
+        .join("refs")
+        .join("heads")
+        .join("agent")
+        .join("demo")
+        .display()
+        .to_string();
+    let run_reflog = common
+        .join("logs")
+        .join("refs")
+        .join("heads")
+        .join("agent")
+        .join("demo")
+        .display()
+        .to_string();
+    assert!(
+        !grants.contains(&&refs_root),
+        "refs root must not be granted: {grants:?}"
+    );
+    assert!(
+        !grants.contains(&&logs_root),
+        "logs root must not be granted: {grants:?}"
+    );
+    assert!(
+        grants.contains(&&run_ref),
+        "run ref directory must be present: {grants:?}"
+    );
+    assert!(
+        grants.contains(&&run_reflog),
+        "run reflog directory must be present: {grants:?}"
+    );
     assert!(
         grants.iter().all(|path| {
             let path = Path::new(path);
             path.ends_with("objects")
-                || path.ends_with("refs")
-                || path.ends_with("logs")
+                || path.ends_with(Path::new("refs/heads/agent/demo"))
+                || path.ends_with(Path::new("logs/refs/heads/agent/demo"))
                 || path.ends_with(Path::new("worktrees").join("demo"))
         }),
         "`.git` must stay an allow-list of specific metadata paths: {grants:?}"
     );
+}
+
+#[test]
+fn wrap_refuses_a_worktree_branch_without_a_slash() {
+    let fake = FakeNono::new("0.80.0");
+    let root = TempDir::new().expect("a temporary directory");
+    let subject = resolve(&fake, &root);
+    let mut worktree = worktree_under(&root);
+    worktree.branch = "noslash".to_owned();
+    let spec = SandboxSpec {
+        checkout: &worktree.path,
+        worktree: Some(&worktree),
+        read_paths: Vec::new(),
+        read_files: Vec::new(),
+        loopback_ports: Vec::new(),
+        listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
+        writable_paths: Vec::new(),
+    };
+    let error = subject
+        .wrap_agent(vec!["codex".to_owned()], &spec)
+        .expect_err("refuse branch without slash");
+    match error {
+        Error::Sandbox { detail } => {
+            assert!(
+                detail.contains("missing ref namespace"),
+                "error must name the missing ref namespace: {detail}"
+            );
+        }
+        other => panic!("expected Error::Sandbox, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1086,6 +1218,7 @@ fn wrap_agent_without_a_worktree_adds_no_git_grants() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
 
@@ -1115,6 +1248,7 @@ fn wrap_review_uses_the_read_only_profile_and_no_git_grants() {
         read_files: Vec::new(),
         loopback_ports: vec![9],
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
 
@@ -1173,6 +1307,7 @@ fn wrap_refuses_an_empty_argv() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
 
@@ -1201,6 +1336,7 @@ fn the_wrapped_argv_executes_the_child_after_the_separator() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
 
@@ -1662,6 +1798,7 @@ async fn real_nono_resolves_preflights_and_launches_a_child() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
     let wrapped = subject
@@ -1819,6 +1956,7 @@ fn wrap_refuses_a_worktree_grant_that_is_not_the_named_entry() {
             read_files: Vec::new(),
             loopback_ports: Vec::new(),
             listen_ports: Vec::new(),
+            bypass_protection: Vec::new(),
             writable_paths: Vec::new(),
         };
         let error = subject
@@ -2006,6 +2144,7 @@ fn wrap_agent_grants_listen_without_connect() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: vec![0],
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
     let argv = subject
@@ -2035,6 +2174,7 @@ fn wrap_refuses_a_relative_grant() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
     let error = subject
@@ -2056,10 +2196,246 @@ fn wrap_refuses_a_relative_checkout() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
     let error = subject
         .wrap_review(vec!["agy".to_owned()], &spec)
         .expect_err("a relative checkout must be refused");
     assert!(error.to_string().contains("not absolute"), "{error}");
+}
+
+#[test]
+fn wrap_grants_a_caller_supplied_protection_bypass() {
+    let fake = FakeNono::new("0.80.0");
+    let root = TempDir::new().expect("a temporary directory");
+    let subject = resolve(&fake, &root);
+    let checkout = root.path().join("checkout");
+    let keychain = std::path::Path::new("/Users/example/Library/Keychains/login.keychain-db");
+    let spec = SandboxSpec {
+        checkout: &checkout,
+        worktree: None,
+        read_paths: Vec::new(),
+        read_files: Vec::new(),
+        loopback_ports: Vec::new(),
+        listen_ports: Vec::new(),
+        bypass_protection: vec![keychain],
+        writable_paths: Vec::new(),
+    };
+    let argv = subject
+        .wrap_agent(vec!["claude".to_owned()], &spec)
+        .expect("wrap");
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--bypass-protection", keychain.to_str().unwrap()]),
+        "a caller-supplied bypass must reach nono: {argv:?}"
+    );
+}
+
+#[test]
+fn wrap_verify_uses_the_verification_profile() {
+    let fake = FakeNono::new("0.80.0");
+    let root = TempDir::new().expect("a temporary directory");
+    let subject = resolve(&fake, &root);
+    let checkout = root.path().join("checkout");
+    let spec = SandboxSpec {
+        checkout: &checkout,
+        worktree: None,
+        read_paths: Vec::new(),
+        read_files: Vec::new(),
+        loopback_ports: Vec::new(),
+        listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
+        writable_paths: Vec::new(),
+    };
+    let argv = subject
+        .wrap_verify(vec!["make".to_owned(), "verify".to_owned()], &spec)
+        .expect("wrap");
+    let profile = argv
+        .iter()
+        .position(|argument| argument == "--profile")
+        .map(|index| argv[index + 1].as_str())
+        .expect("a --profile argument");
+    assert!(
+        profile.ends_with("-verify.json"),
+        "the verification launch must use the verification profile: {profile}"
+    );
+    assert!(
+        !argv.iter().any(|argument| argument == "--allow-cwd"),
+        "a writable workdir needs no allow-cwd: {argv:?}"
+    );
+}
+
+#[test]
+fn the_verify_profile_is_writable_and_offline() {
+    let profile = embedded_profile(VERIFY_PROFILE);
+    assert_eq!(profile.extends, "default");
+    // A build must write its target directory; the sandbox's purpose here is the network and
+    // credential boundary, not a read-only checkout.
+    assert_eq!(profile.workdir.access, "readwrite");
+    assert!(profile.network.block, "verification runs offline");
+    assert!(
+        profile.network.allow_domain.is_empty(),
+        "the verify profile allows no host by default: {:?}",
+        profile.network.allow_domain
+    );
+    for forbidden in [
+        "$HOME/.claude",
+        "$HOME/.claude.json",
+        "$HOME/.codex",
+        "$HOME/.gemini",
+        "$HOME/.dsh",
+        "$HOME/Library/Keychains/login.keychain-db",
+    ] {
+        assert!(
+            !profile.filesystem.read.iter().any(|path| path == forbidden),
+            "the verify profile must not read `{forbidden}`"
+        );
+    }
+    for required in REQUIRED_DENIES {
+        assert_contains(&profile.filesystem.deny, required);
+    }
+}
+
+#[tokio::test]
+async fn doctor_reports_the_read_only_package_caches() {
+    let fake = FakeNono::new("0.80.0");
+    let root = TempDir::new().expect("a temporary directory");
+    let state = root.path().join("xdg-state");
+    std::fs::create_dir_all(&state).expect("state");
+    set_state_root(&state);
+    let subject = resolve(&fake, &root);
+    subject.preflight().await.expect("preflight");
+
+    let lines = subject.doctor_lines().await;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.text.contains("package caches: read-only")),
+        "doctor must name the cold-cache trade instead of leaving it to be discovered mid-run: {lines:?}"
+    );
+}
+
+#[test]
+fn wrap_refuses_a_writable_grant_above_the_checkout() {
+    let fake = FakeNono::new("0.80.0");
+    let root = TempDir::new().expect("a temporary directory");
+    let subject = resolve(&fake, &root);
+    let checkout = root.path().join("repo");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    let ancestor = root.path().to_path_buf();
+    let spec = SandboxSpec {
+        checkout: &checkout,
+        worktree: None,
+        read_paths: Vec::new(),
+        read_files: Vec::new(),
+        loopback_ports: Vec::new(),
+        listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
+        writable_paths: vec![&ancestor],
+    };
+    let error = subject
+        .wrap_agent(vec!["agy".to_owned()], &spec)
+        .expect_err("a grant above the checkout must be refused");
+    assert!(
+        error.to_string().contains("ancestor of the checkout"),
+        "{error}"
+    );
+
+    // A sibling grant stays legal: the caller's per-run state lives outside the worktree.
+    let sibling = root.path().join("state");
+    let spec = SandboxSpec {
+        checkout: &checkout,
+        worktree: None,
+        read_paths: Vec::new(),
+        read_files: Vec::new(),
+        loopback_ports: Vec::new(),
+        listen_ports: Vec::new(),
+        bypass_protection: Vec::new(),
+        writable_paths: vec![&sibling],
+    };
+    subject
+        .wrap_agent(vec!["agy".to_owned()], &spec)
+        .expect("a sibling grant is not an ancestor");
+}
+
+/// A supervisor stand-in that answers the audit queries with canned sessions.
+fn audit_stub(root: &std::path::Path) -> std::path::PathBuf {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin directory");
+    let nono = bin.join("nono");
+    std::fs::write(
+        &nono,
+        r#"#!/bin/sh
+case "$1" in
+  --version) echo 'nono 0.80.0'; exit 0 ;;
+  audit)
+    case "$2" in
+      list)
+        cat <<'JSON'
+[
+ {"session_id":"old","started":"2026-10-28T10:00:00.000000+02:00","ended":"2026-10-28T10:00:01.000000+02:00","command":["claude","-p","x"]},
+ {"session_id":"new","started":"2026-10-28T10:00:02.000000+02:00","ended":"2026-10-28T10:00:03.000000+02:00","command":["claude","-p","x"]},
+ {"session_id":"other","started":"2026-10-28T10:00:04.000000+02:00","ended":"2026-10-28T10:00:05.000000+02:00","command":["codex","exec"]}
+]
+JSON
+        ;;
+      show)
+        cat <<'JSON'
+{"session_id":"new","network_events":[
+ {"decision":"deny","denial_category":"host_denied","target":"example.com","port":443,"reason":"host example.com:443 is not in the allowlist"},
+ {"decision":"allow","target":"api.anthropic.com","port":443,"reason":"allowlisted"}
+],"command_policy_events":[]}
+JSON
+        ;;
+    esac ;;
+esac
+"#,
+    )
+    .expect("write the audit stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&nono).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&nono, permissions).expect("make it executable");
+    }
+    let old = std::env::var_os("PATH").unwrap_or_default();
+    // SAFETY: nextest gives each test its own process.
+    unsafe {
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.display(), old.to_string_lossy()),
+        );
+    }
+    nono
+}
+
+#[tokio::test]
+async fn audit_picks_the_newest_session_with_the_same_command_and_parses_decisions() {
+    let root = TempDir::new().expect("a temporary directory");
+    let _nono = audit_stub(root.path());
+    let sandbox = Sandbox::resolve(root.path().join("profiles")).expect("resolve");
+
+    let audit = sandbox
+        .audit_session(&["claude".to_owned(), "-p".to_owned(), "x".to_owned()])
+        .await
+        .expect("a matching session");
+    assert_eq!(audit.session_id, "new", "the newest matching session wins");
+    assert_eq!(audit.network.len(), 2, "{audit:?}");
+    assert_eq!(audit.network[0].decision, "deny");
+    assert_eq!(audit.network[0].category.as_deref(), Some("host_denied"));
+    assert_eq!(audit.network[0].target, "example.com");
+    assert_eq!(audit.network[0].port, Some(443));
+    assert!(audit.network[0].reason.contains("not in the allowlist"));
+    assert_eq!(audit.network[1].decision, "allow");
+    assert_eq!(audit.command_policy_events, 0);
+
+    // A command the supervisor never saw yields no audit, not an error.
+    assert!(
+        sandbox
+            .audit_session(&["never".to_owned(), "ran".to_owned()])
+            .await
+            .is_none()
+    );
 }

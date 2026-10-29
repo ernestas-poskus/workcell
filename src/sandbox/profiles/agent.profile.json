@@ -2,7 +2,7 @@
   "$schema": "https://nono.sh/schemas/nono-profile.schema.json",
   "meta": {
     "name": "workcell-agent",
-    "description": "workcell agent run: writable checkout, read-only harness configuration, toolchain caches writable, host credentials and repository instruction files denied. The harness configuration is read-only on purpose: a hook, notify command, MCP server, or plugin planted in ~/.claude/settings.json, ~/.codex/config.toml, ~/.grok/config.toml, or ~/.gemini/antigravity-cli/settings.json would execute in the human's next session, outside this sandbox. Only the named harness state directories (session history, logs, crash reports, caches) and the harness's own credentials are writable. Loopback is not granted here: a caller that needs an arbitrary-port bind (measured: claude, agy) grants it per run. Package caches are read-only, because a warm offline build wrote nothing to them.",
+    "description": "workcell agent run: writable checkout, toolchain caches read-only, repository instruction files denied. Harness configuration, harness credentials, and the login keychain are NOT granted here: a caller names the harness-owned paths its agent needs per run (read, read-file, and bypass-protection), so a child cannot read another harness's configuration or credential. The profile stays neutral about which harness runs. Only named harness state directories are writable (session history, logs, crash reports); configuration is never writable, because a hook, notify command, MCP server, or plugin planted there would execute in the human's next session. Loopback is a per-run caller grant too, never a profile default. Package caches are read-only, because a warm offline build wrote nothing to them.",
     "author": "workcell"
   },
   "extends": "default",
@@ -80,20 +80,7 @@
       "$HOME/.cargo/registry",
       "$HOME/.cargo/git",
       "$HOME/.rustup",
-      "$HOME/.local/bin",
-      "$HOME/.claude",
-      "$HOME/.claude.json",
-      "$HOME/.codex",
-      "$HOME/.gemini",
-      "$HOME/.antigravity",
-      "$HOME/.grok",
-      "$HOME/.dsh",
-      "$HOME/Library/Keychains/login.keychain-db",
-      "$HOME/Library/Keychains/metadata.keychain-db"
-    ],
-    "bypass_protection": [
-      "$HOME/Library/Keychains/login.keychain-db",
-      "$HOME/Library/Keychains/metadata.keychain-db"
+      "$HOME/.local/bin"
     ],
     "deny": [
       "$WORKDIR/**/AGENTS.md",

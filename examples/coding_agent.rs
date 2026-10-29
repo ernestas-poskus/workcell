@@ -42,6 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut codex_home_mode = false;
     let mut loopback_ports: Vec<u16> = Vec::new();
     let mut listen_ports: Vec<u16> = Vec::new();
+    let mut harness_reads: Vec<PathBuf> = Vec::new();
+    let mut harness_read_files: Vec<PathBuf> = Vec::new();
+    let mut harness_bypass: Vec<PathBuf> = Vec::new();
     while let Some(flag) = args.peek().map(String::as_str) {
         match flag {
             "--review" => review = true,
@@ -50,6 +53,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--codex-home" => codex_home_mode = true,
             // The profile grants no loopback. A harness whose measured behaviour needs an
             // arbitrary-port bind (claude, agy) asks for it here; `0` is the wildcard.
+            // The caller names the harness-owned paths its agent needs. Nothing here is a profile
+            // grant, so this is also how a test proves one harness cannot read another's config.
+            "--read-path" | "--harness-read" => {
+                args.next();
+                let path = args.peek().ok_or("--read-path needs a path")?;
+                harness_reads.push(PathBuf::from(path));
+            }
+            "--read-file" | "--harness-read-file" => {
+                args.next();
+                let path = args.peek().ok_or("--read-file needs a path")?;
+                harness_read_files.push(PathBuf::from(path));
+            }
+            "--bypass-protection" => {
+                args.next();
+                let path = args.peek().ok_or("--bypass-protection needs a path")?;
+                harness_bypass.push(PathBuf::from(path));
+            }
             // Listen-only: an arbitrary-port bind without the connect half. Measured: agy works
             // with this and claude does not (it needs the connect), so both are available.
             "--listen" => {
@@ -125,10 +145,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = SandboxSpec {
         checkout: &checkout,
         worktree: worktree.as_ref(),
-        read_paths: Vec::new(),
-        read_files: Vec::new(),
+        read_paths: harness_reads.iter().map(PathBuf::as_path).collect(),
+        read_files: harness_read_files.iter().map(PathBuf::as_path).collect(),
         loopback_ports,
         listen_ports,
+        bypass_protection: harness_bypass.iter().map(PathBuf::as_path).collect(),
         writable_paths: codex_home.as_deref().into_iter().collect(),
     };
     let argv = if review {

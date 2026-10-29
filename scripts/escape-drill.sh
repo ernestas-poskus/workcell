@@ -507,16 +507,15 @@ PY' \
 worktree_suite() {
     local base="$WORK_DIR/worktree-base" wt="$WORK_DIR/worktree"
     new_repo "$base"
-    git -C "$base" worktree add -q -b escape-worktree "$wt"
+    git -C "$base" worktree add -q -b escape/worktree/head "$wt"
 
     probe_allowed worktree_commit worktree worktree "$wt" run_worktree \
         'printf work > escape-work.txt && git add escape-work.txt && git -c user.name=escape -c user.email=escape@example.invalid commit -qm work && echo ESCAPE:ALLOWED || echo ESCAPE:DENIED' \
         "the linked worktree's branch commit is allowed"
 
-    probe_finding_on_access worktree_refs worktree worktree "$wt" run_worktree \
-        'git update-ref refs/heads/escape-probe HEAD 2>/dev/null && echo ESCAPE:ALLOWED || echo ESCAPE:DENIED' \
-        "the child cannot move repository refs from the worktree" \
-        "the worktree's refs are writable; the caller's head/base checks are the mitigation (documented residual)"
+    probe_denied worktree_refs worktree worktree "$wt" run_worktree \
+        'git update-ref refs/heads/main HEAD 2>/dev/null && echo ESCAPE:ALLOWED || echo ESCAPE:DENIED' \
+        "the child cannot move repository refs from the worktree"
 
     probe_denied worktree_config worktree worktree "$wt" run_worktree \
         'git config --local escape.probe 1 2>/dev/null && echo ESCAPE:WRITE || echo ESCAPE:DENIED' \
@@ -638,6 +637,14 @@ plumbing_suite() {
         'python3 -c "import os,sys,time; pid=os.fork(); (os.setsid(),time.sleep(2),open(\"setsid-marker\",\"w\").write(\"x\"),os._exit(0)) if pid==0 else None"; sleep 4; [ -e setsid-marker ] && echo ESCAPE:WRITE || echo ESCAPE:NONE' \
         "a re-sessioned grandchild does not outlive the run" \
         "the daemon wrote its marker after the run exited; it is still sandboxed, but it can act after the guard read"
+
+    # Inherited descriptors: a child that can read the parent's files through an inherited fd
+    # bypasses every path grant. The example opens the run log and the published profiles; Rust
+    # opens them close-on-exec, and this records the fact rather than assuming it.
+    probe_finding_on_access inherited_fds filesystem plain "$dir" run_plain \
+        'for fd in /dev/fd/*; do target=$(readlink "$fd" 2>/dev/null) || continue; case "$target" in *__STATE_DIR__*|*state.db*|*sqlite*|*.wirepuller*|*.workcell*|*run.log*) echo ESCAPE:READ; exit 0 ;; esac; done; echo ESCAPE:NONE' \
+        "the child inherits no descriptor into run-control state" \
+        "a child can read a run-control file through an inherited descriptor, which bypasses the path grants"
 
     # The protected profile directory must not be writable by the child.
     run_plain profile_tamper "$dir" '

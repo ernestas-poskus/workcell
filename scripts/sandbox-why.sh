@@ -44,6 +44,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILES="$ROOT_DIR/src/sandbox/profiles"
 AGENT="$PROFILES/agent.profile.json"
 REVIEW="$PROFILES/review.profile.json"
+VERIFY="$PROFILES/verify.profile.json"
 FAILURES=0
 CHECKS=0
 
@@ -189,7 +190,7 @@ expect_deny  agent_cargo_credentials_case "$AGENT" "$HOME/.cargo/CREDENTIALS.tom
 expect_deny  agent_gh_config          "$AGENT" "$HOME/.config/gh" read filesystem_deny
 expect_deny  agent_launchagents       "$AGENT" "$HOME/Library/LaunchAgents/probe.plist" write path_not_granted
 expect_deny  agent_gitconfig_write    "$AGENT" "$HOME/.gitconfig" write insufficient_access
-expect_deny  agent_harness_config_write "$AGENT" "$HOME/.claude/settings.json" write insufficient_access
+expect_deny  agent_harness_config_write "$AGENT" "$HOME/.claude/settings.json" write path_not_granted
 
 # ── the checkout's instruction files and rendered state paths ────────────────
 expect_deny  agent_workdir_agents     "$AGENT" "$WORKDIR/AGENTS.md" read filesystem_deny
@@ -207,8 +208,10 @@ expect_allow agent_cargo_git_read       "$AGENT" "$HOME/.cargo/git/checkouts/pro
 expect_deny  agent_cargo_git_write      "$AGENT" "$HOME/.cargo/git/checkouts/probe/abc/build.rs" write insufficient_access
 expect_allow agent_shell_snapshots    "$AGENT" "$HOME/.claude/shell-snapshots/probe.sh" readwrite read+write
 expect_allow agent_harness_state      "$AGENT" "$HOME/.claude/projects/probe.jsonl" readwrite read+write
-expect_allow agent_dsh_state          "$AGENT" "$HOME/.dsh/.credentials.yaml" read read
-expect_allow agent_keychain_read      "$AGENT" "$HOME/Library/Keychains/login.keychain-db" read read
+expect_deny  agent_dsh_state          "$AGENT" "$HOME/.dsh/.credentials.yaml" read path_not_granted
+expect_deny  agent_keychain_read      "$AGENT" "$HOME/Library/Keychains/login.keychain-db" read filesystem_deny
+# The caller names its own harness path per run; the profile grants none of them.
+expect_allow agent_caller_harness_read "$AGENT" "$HOME/.claude" read read --read "$HOME/.claude"
 expect_allow agent_agy_token_write    "$AGENT" "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" write read+write
 
 # ── egress: the allowlist is a proxy, and the proxy is the only route ────────
@@ -224,9 +227,14 @@ expect_host_allow agent_egress_provider    "$AGENT" "api.anthropic.com" 443 prox
 expect_dry_run review_net_proxy       "$REVIEW" '^[[:space:]]*net[[:space:]]+proxy[[:space:]]*$'
 expect_dry_run_absent review_ipc_loopback    "$REVIEW" '^[[:space:]]*ipc[[:space:]]+localhost:0[[:space:]]*$'
 expect_deny  review_checkout_write    "$REVIEW" "$WORKDIR/probe.txt" write insufficient_access --read "$WORKDIR"
-expect_deny  review_harness_config_write "$REVIEW" "$HOME/.claude/settings.json" write insufficient_access
+expect_deny  review_harness_config_write "$REVIEW" "$HOME/.claude/settings.json" write path_not_granted
 expect_allow review_checkout_read     "$REVIEW" "$WORKDIR/README.md" read read --read "$WORKDIR"
 expect_allow review_agy_token_write   "$REVIEW" "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" write read+write
+
+# ── the verification profile: no network, no harness state, writable checkout ─
+expect_deny  verify_harness_config   "$VERIFY" "$HOME/.claude/settings.json" read path_not_granted
+expect_deny  verify_keychain         "$VERIFY" "$HOME/Library/Keychains/login.keychain-db" read filesystem_deny
+expect_host_deny verify_egress       "$VERIFY" "api.anthropic.com" 443 network
 
 if [ "$FAILURES" -gt 0 ]; then
     say "sandbox-why: $FAILURES of $((CHECKS + FAILURES)) assertion(s) failed"

@@ -9,8 +9,9 @@
 //! caller supplies in [`SandboxSpec`]. The agent profile makes the run's checkout writable, leaves
 //! the repository's execution-semantics paths (`.git/hooks`, `.git/config`, `.git/info`), the
 //! control plane's state directory, and agent instruction/config files unwritable or absent,
-//! leaves host credential stores denied, and does not restrict egress. The review profile makes
-//! the checkout read-only.
+//! leaves host credential stores denied, and does not restrict egress. A worktree run may write only
+//! its own branch ref and reflog, while integration alone updates the base ref and an in-run `git fetch`
+//! is denied. The review profile makes the checkout read-only.
 //!
 //! The profiles are compiled into this crate and rendered with [`SandboxOptions`], then published
 //! content-addressed under the caller's profile directory, so concurrent runs share one reviewed
@@ -51,6 +52,9 @@ const AGENT_PROFILE: &str = include_str!("sandbox/profiles/agent.profile.json");
 
 /// The embedded review profile: the same policy with a read-only checkout.
 const REVIEW_PROFILE: &str = include_str!("sandbox/profiles/review.profile.json");
+
+/// The verification profile: the repository's commands, writable checkout, no network.
+const VERIFY_PROFILE: &str = include_str!("sandbox/profiles/verify.profile.json");
 
 /// The in-checkout state directory both embedded profiles deny by default.
 ///
@@ -185,12 +189,31 @@ impl SandboxSpec<'_> {
                 ),
             });
         }
+        // A write grant above the checkout hands the child the caller's whole tree, which is
+        // strictly wider than the run: the sandbox would contain the agent's own worktree and
+        // then grant its parent. The checkout itself is the workdir grant, not an extra one.
+        for path in &self.writable_paths {
+            if self.checkout.starts_with(path) && *path != self.checkout {
+                return Err(Error::Sandbox {
+                    detail: format!(
+                        "the sandbox writable grant `{}` is an ancestor of the checkout `{}`; a write grant at that level hands the child the caller's tree",
+                        path.display(),
+                        self.checkout.display()
+                    ),
+                });
+            }
+        }
         for (label, path) in self
             .read_paths
             .iter()
             .map(|path| ("read", *path))
             .chain(self.read_files.iter().map(|path| ("read-file", *path)))
             .chain(self.writable_paths.iter().map(|path| ("writable", *path)))
+            .chain(
+                self.bypass_protection
+                    .iter()
+                    .map(|path| ("bypass-protection", *path)),
+            )
         {
             if !path.is_absolute() {
                 return Err(Error::Sandbox {
@@ -222,6 +245,12 @@ pub struct SandboxSpec<'a> {
     pub read_files: Vec<&'a Path>,
     /// Loopback ports the child may reach (for example a local compression proxy).
     pub loopback_ports: Vec<u16>,
+    /// Files whose macOS protection the child may bypass (for example a keychain database).
+    ///
+    /// A protected file is not readable through a plain read grant, so a caller that needs one
+    /// names it here as well; `nono --bypass-protection` is the only way to reach it. Kept
+    /// caller-supplied so the profile stays neutral about which credential store it is.
+    pub bypass_protection: Vec<&'a Path>,
     /// Loopback ports the child may **listen** on without reaching them.
     ///
     /// Measured: some harnesses need an arbitrary-port bind but not the connect half, and
@@ -264,12 +293,15 @@ pub struct Sandbox {
     profile_dir: PathBuf,
     agent_profile: PathBuf,
     review_profile: PathBuf,
+    verify_profile: PathBuf,
     /// The rendered bytes `agent_profile` addresses. Preflight publishes these and the read-back
     /// checks compare against them, so the digest, the published bytes, and the verification all
     /// come from one rendering rather than three.
     agent_contents: String,
     /// The rendered bytes `review_profile` addresses.
     review_contents: String,
+    /// The rendered bytes `verify_profile` addresses.
+    verify_contents: String,
 }
 
 impl Sandbox {
@@ -305,6 +337,7 @@ impl Sandbox {
         validate_state_dir(&options.state_dir)?;
         let agent_contents = render_profile(AGENT_PROFILE, &options.state_dir);
         let review_contents = render_profile(REVIEW_PROFILE, &options.state_dir);
+        let verify_contents = render_profile(VERIFY_PROFILE, &options.state_dir);
         let binary = resolve_binary(SANDBOX_BINARY)?;
         let profile_dir = absolute_profile_dir(&profile_dir.into())?;
         Ok(Self {
@@ -312,9 +345,11 @@ impl Sandbox {
             version: OnceLock::new(),
             agent_profile: profile_path(&profile_dir, "agent", &agent_contents),
             review_profile: profile_path(&profile_dir, "review", &review_contents),
+            verify_profile: profile_path(&profile_dir, "verify", &verify_contents),
             profile_dir,
             agent_contents,
             review_contents,
+            verify_contents,
         })
     }
 
@@ -340,6 +375,12 @@ impl Sandbox {
     #[must_use]
     pub fn review_profile(&self) -> &Path {
         &self.review_profile
+    }
+
+    /// The content-addressed verification profile path. It exists after `preflight` has published it.
+    #[must_use]
+    pub fn verify_profile(&self) -> &Path {
+        &self.verify_profile
     }
 
     /// The directory the profiles were published under.
@@ -422,14 +463,7 @@ impl Sandbox {
             },
         }
 
-        for (kind, path, expected) in [
-            ("agent", &self.agent_profile, self.agent_contents.as_str()),
-            (
-                "review",
-                &self.review_profile,
-                self.review_contents.as_str(),
-            ),
-        ] {
+        for (kind, path, expected) in self.profiles() {
             match tokio::fs::read(path).await {
                 Ok(bytes) if bytes == expected.as_bytes() => lines.push(DoctorLine::ok(format!(
                     "{kind} sandbox profile: `{}`",
@@ -453,6 +487,13 @@ impl Sandbox {
             },
             Err(error) => lines.push(DoctorLine::fail(error.to_string())),
         }
+
+        // A cold-cache surprise is the trade of read-only package caches: the build fails inside
+        // the sandbox instead of fetching, so the operator pre-fetches. Say so in `doctor` rather
+        // than leaving it to be discovered mid-run.
+        lines.push(DoctorLine::ok(
+            "package caches: read-only; a dependency that is not already cached must be fetched outside the sandbox before dispatch",
+        ));
 
         lines
     }
@@ -484,6 +525,21 @@ impl Sandbox {
     pub fn wrap_review(&self, argv: Vec<String>, spec: &SandboxSpec<'_>) -> Result<Vec<String>> {
         spec.validate()?;
         self.wrap(argv, spec, &self.review_profile, false, true)
+    }
+
+    /// Wrap one verification command for the sandbox.
+    ///
+    /// Verification runs repository-defined commands in an already agent-written checkout, so the
+    /// checkout is writable (a build must write its target directory) but the run gets no network,
+    /// no harness configuration, no keychain, and read-only package caches. A refused launch is a
+    /// failure, never a pass.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sandbox`] when the grants are not absolute or the wrapper cannot be built.
+    pub fn wrap_verify(&self, argv: Vec<String>, spec: &SandboxSpec<'_>) -> Result<Vec<String>> {
+        spec.validate()?;
+        self.wrap(argv, spec, &self.verify_profile, false, false)
     }
 
     /// Remove environment variables that would reconfigure the sandbox or inject code into it.
@@ -583,6 +639,11 @@ impl Sandbox {
     }
 
     /// Build the deterministic `nono` argv for one launch.
+    ///
+    /// In worktree mode with Git grants enabled, grants read access to the common Git directory and
+    /// write access only to `objects`, the run's ref directory (`refs/heads/<namespace>`), the run's
+    /// reflog directory (`logs/refs/heads/<namespace>`), and the worktree Git directory. Integration
+    /// alone updates the base ref, and an in-run `git fetch` is denied.
     fn wrap(
         &self,
         argv: Vec<String>,
@@ -623,14 +684,27 @@ impl Sandbox {
 
         // `.git` is an allow-list: only the metadata Git itself needs to commit is writable, so
         // `hooks`, `config`, `info`, and every other worktree stay outside the grant.
+        // A worktree run may write only its own branch ref and reflog (`refs/heads/<namespace>`
+        // and `logs/refs/heads/<namespace>`), its own worktree Git directory, and `objects`.
+        // Integration alone updates the base ref, and in-run `git fetch` is denied.
         if git_grants && let Some(worktree) = spec.worktree {
+            let (run_ref_dir, run_reflog_dir) = worktree.run_ref_dirs().map_err(|error| {
+                Error::Sandbox {
+                    detail: format!(
+                        "cannot grant git metadata: missing ref namespace in worktree branch `{}`: {error}",
+                        worktree.branch
+                    ),
+                }
+            })?;
             let common = &worktree.git_common_dir;
             wrapped.push("--read".to_owned());
             wrapped.push(path_text(common, "the worktree git common directory")?.to_owned());
-            for metadata in ["objects", "refs", "logs"] {
-                wrapped.push("--allow".to_owned());
-                wrapped.push(path_text(&common.join(metadata), "a git metadata grant")?.to_owned());
-            }
+            wrapped.push("--allow".to_owned());
+            wrapped.push(path_text(&common.join("objects"), "a git metadata grant")?.to_owned());
+            wrapped.push("--allow".to_owned());
+            wrapped.push(path_text(&run_ref_dir, "the run ref directory")?.to_owned());
+            wrapped.push("--allow".to_owned());
+            wrapped.push(path_text(&run_reflog_dir, "the run reflog directory")?.to_owned());
             wrapped.push("--allow".to_owned());
             wrapped.push(
                 path_text(&worktree_git_dir_grant(worktree)?, "the worktree git grant")?.to_owned(),
@@ -644,6 +718,10 @@ impl Sandbox {
         for path in &spec.read_files {
             wrapped.push("--read-file".to_owned());
             wrapped.push(path_text(path, "a sandbox read-file grant")?.to_owned());
+        }
+        for path in &spec.bypass_protection {
+            wrapped.push("--bypass-protection".to_owned());
+            wrapped.push(path_text(path, "a sandbox protection bypass")?.to_owned());
         }
         for port in &spec.loopback_ports {
             wrapped.push("--open-port".to_owned());
@@ -659,25 +737,31 @@ impl Sandbox {
         Ok(wrapped)
     }
 
-    /// Publish both embedded profiles content-addressed, then verify the bytes on disk.
+    /// Every embedded profile as `(kind, published path, rendered bytes)`.
+    fn profiles(&self) -> [(&'static str, &Path, &str); 3] {
+        [
+            ("agent", &self.agent_profile, self.agent_contents.as_str()),
+            (
+                "review",
+                &self.review_profile,
+                self.review_contents.as_str(),
+            ),
+            (
+                "verify",
+                &self.verify_profile,
+                self.verify_contents.as_str(),
+            ),
+        ]
+    }
+
+    /// Publish every embedded profile content-addressed, then verify the bytes on disk.
     ///
     /// A concurrent run may publish the same content first; the no-clobber write keeps the first
     /// copy and the verification below refuses a copy that is not the reviewed one.
     async fn publish_profiles(&self) -> Result<()> {
-        publish_profile(
-            &self.profile_dir,
-            "agent",
-            &self.agent_contents,
-            &self.agent_profile,
-        )
-        .await?;
-        publish_profile(
-            &self.profile_dir,
-            "review",
-            &self.review_contents,
-            &self.review_profile,
-        )
-        .await?;
+        for (kind, path, contents) in self.profiles() {
+            publish_profile(&self.profile_dir, kind, contents, path).await?;
+        }
         self.verify_profiles().await
     }
 
@@ -697,14 +781,7 @@ impl Sandbox {
     /// [`Error::Sandbox`] when a published profile is missing, is not a regular file under the
     /// read bound, or no longer matches the embedded bytes.
     pub async fn verify_profiles(&self) -> Result<()> {
-        for (kind, path, expected) in [
-            ("agent", &self.agent_profile, self.agent_contents.as_str()),
-            (
-                "review",
-                &self.review_profile,
-                self.review_contents.as_str(),
-            ),
-        ] {
+        for (kind, path, expected) in self.profiles() {
             let published = read_published_profile(path, kind).await?.ok_or_else(|| {
                 Error::Sandbox {
                     detail: format!(
@@ -762,11 +839,8 @@ impl Sandbox {
 
     /// `nono profile validate <published agent profile>`.
     async fn validate_profiles(&self) -> Result<()> {
-        for (kind, profile) in [
-            ("agent", &self.agent_profile),
-            ("review", &self.review_profile),
-        ] {
-            validate_profile(&self.binary, kind, profile).await?;
+        for (kind, path, _) in self.profiles() {
+            validate_profile(&self.binary, kind, path).await?;
         }
         Ok(())
     }
@@ -879,6 +953,146 @@ async fn output_with_deadline(
         .map_err(|error| Error::Sandbox {
             detail: format!("{label}: {error}; the sandbox binary is not usable"),
         })
+}
+
+/// How long the audit queries may take before the audit is treated as unavailable.
+const AUDIT_QUERY_TIMEOUT_SECS: u64 = 10;
+
+/// One network decision the sandbox supervisor recorded for a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkDecision {
+    /// `allow` or `deny`.
+    pub decision: String,
+    /// The supervisor's classification of a denial (`host_denied`, …), when it gave one.
+    pub category: Option<String>,
+    /// The target host or socket.
+    pub target: String,
+    /// The target port, when the decision names one.
+    pub port: Option<u16>,
+    /// The supervisor's reason.
+    pub reason: String,
+}
+
+/// One session row from `audit list --json`; only the fields correlation needs.
+#[derive(serde::Deserialize)]
+struct AuditSessionRef {
+    session_id: String,
+    #[serde(default)]
+    ended: Option<String>,
+    command: Vec<String>,
+}
+
+/// One network event from `audit show --json`.
+#[derive(serde::Deserialize)]
+struct AuditNetworkEvent {
+    decision: String,
+    #[serde(default)]
+    denial_category: Option<String>,
+    target: String,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// The subset of `audit show --json` this crate reads.
+#[derive(serde::Deserialize)]
+struct AuditSessionDetails {
+    #[serde(default)]
+    network_events: Vec<AuditNetworkEvent>,
+    #[serde(default)]
+    command_policy_events: Vec<serde::de::IgnoredAny>,
+}
+
+/// What the supervisor's audit trail recorded for one session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionAudit {
+    /// The session id in the supervisor's audit store.
+    pub session_id: String,
+    /// Every network decision, in recorded order.
+    pub network: Vec<NetworkDecision>,
+    /// How many command-policy events the session recorded.
+    pub command_policy_events: usize,
+}
+
+impl Sandbox {
+    /// Read the supervisor's audit for the newest completed session that ran `argv`.
+    ///
+    /// The supervisor assigns the session id and does not return it to the launcher, so the session
+    /// is correlated by command: among sessions whose child argv equals `argv` exactly, the most
+    /// recently ended one is taken. Two concurrent runs of an identical command can therefore be
+    /// confused, which is why this is observability — never an authorization decision — and why a
+    /// failure returns `None` rather than failing the run.
+    pub async fn audit_session(&self, argv: &[String]) -> Option<SessionAudit> {
+        if argv.is_empty() {
+            return None;
+        }
+        let env: BTreeMap<String, String> = std::env::vars().collect();
+        let cwd = std::env::temp_dir();
+        let list = crate::process::capture(
+            vec![
+                path_text(&self.binary, "the sandbox binary")
+                    .ok()?
+                    .to_owned(),
+                "audit".to_owned(),
+                "list".to_owned(),
+                "--json".to_owned(),
+                "--today".to_owned(),
+            ],
+            cwd.clone(),
+            env.clone(),
+            Duration::from_secs(AUDIT_QUERY_TIMEOUT_SECS),
+        )
+        .await
+        .ok()?;
+        if !list.succeeded() {
+            return None;
+        }
+        let sessions: Vec<AuditSessionRef> = serde_json::from_str(&list.stdout).ok()?;
+        let chosen = sessions
+            .into_iter()
+            .filter(|session| session.command == argv)
+            .max_by_key(|session| session.ended.clone())?;
+        let session_id = chosen.session_id;
+
+        let show = crate::process::capture(
+            vec![
+                path_text(&self.binary, "the sandbox binary")
+                    .ok()?
+                    .to_owned(),
+                "audit".to_owned(),
+                "show".to_owned(),
+                session_id.clone(),
+                "--json".to_owned(),
+            ],
+            cwd,
+            env,
+            Duration::from_secs(AUDIT_QUERY_TIMEOUT_SECS),
+        )
+        .await
+        .ok()?;
+        if !show.succeeded() {
+            return None;
+        }
+        let details: AuditSessionDetails = serde_json::from_str(&show.stdout).ok()?;
+        let network = details
+            .network_events
+            .into_iter()
+            .map(|event| NetworkDecision {
+                decision: event.decision,
+                category: event.denial_category,
+                target: event.target,
+                port: event.port,
+                reason: event.reason.unwrap_or_default(),
+            })
+            .collect();
+        let command_policy_events = details.command_policy_events.len();
+        Some(SessionAudit {
+            session_id,
+            network,
+            command_policy_events,
+        })
+    }
 }
 
 /// Make a resolved binary path absolute, so a wrapped launch does not depend on its cwd.
@@ -1054,8 +1268,21 @@ fn validate_state_dir(state_dir: &str) -> Result<()> {
 
 /// The content-addressed path of one embedded profile, without touching the filesystem.
 fn profile_path(directory: &Path, kind: &str, contents: &str) -> PathBuf {
-    let digest = sha256_hex(contents.as_bytes());
+    let digest = profile_digest(contents);
     directory.join(format!("{}-{kind}.json", &digest[..PROFILE_HASH_CHARS]))
+}
+
+/// The content-address digest a published profile is named by.
+///
+/// The address covers more than the rendered policy: it also names the address scheme and the
+/// `nono` floor the policy was reviewed against. A policy change, a scheme change (a different
+/// digest meaning), or a higher minimum `nono` therefore produces a different published name, so a
+/// stale published copy can never be silently reused under an address that now means something
+/// else. The bytes on disk remain the rendered profile alone.
+#[must_use]
+pub fn profile_digest(contents: &str) -> String {
+    const SCHEME: &str = "workcell-profile-1";
+    sha256_hex(format!("{SCHEME}\nnono>={MIN_NONO_VERSION}\n{contents}").as_bytes())
 }
 
 /// Publish one embedded profile content-addressed, atomically, and without clobbering.

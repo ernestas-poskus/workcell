@@ -48,13 +48,17 @@ A sandboxed commit in a linked `git worktree` succeeded. `git config --local` an
 A child that ran `git config core.hooksPath` inside the shared checkout tripped the guard (the
 example exits 3) before the caller's next Git call.
 
-## Refs (FINDING)
+## Refs (PASS in worktree mode, 2026-10-28; historical FINDING superseded)
 
-The agent could run `git update-ref refs/heads/main <sha>`: refs are shared and writable from the
-sandbox. The drill records this as a `FINDING`, not a failed expectation, because the profile does
-not claim to isolate refs. The mitigation available to a caller is a branch-head check plus a
-one-run-per-checkout lock; a follow-up candidate is to record the expected base SHA and refuse a
-base move the caller did not produce. The residual is listed in the README's honest limits.
+In worktree mode, `worktree_refs` transitioned to **PASS**: each worktree child is granted only its
+own ref directory under `refs/heads/<prefix>/<label>/` and reflog directory under
+`logs/refs/heads/<prefix>/<label>/`. An adversarial attempt to update `refs/heads/main` or any ref
+outside the run's ref directory with `git update-ref` is denied by Seatbelt.
+
+*Historical record (2026-10-27, superseded for worktree mode on 2026-10-28):*
+Under the earlier whole-refs grant, the agent could run `git update-ref refs/heads/main <sha>`.
+The drill recorded this as a `FINDING`. In shared-checkout mode, `shared_checkout_refs_writable` remains
+a recorded finding; in worktree mode, the per-run ref grant now enforces containment.
 
 ## Review profile (PASS)
 
@@ -115,6 +119,6 @@ reviews (8/8/10 s). Alternate non-interactive surfaces also ran under the sandbo
 ## Limits of this evidence
 
 One host, three harnesses, one `nono` version. grok and dsh are not exercised, codex resume is
-upstream-broken, refs are writable, the keychain and egress residuals are documented, and the
+upstream-broken, shared-checkout refs are writable (worktree refs contained), the keychain and egress residuals are documented, and the
 hardlink result is host-specific. See the README's
 [honest limits](../README.md#honest-limits) for the full list.

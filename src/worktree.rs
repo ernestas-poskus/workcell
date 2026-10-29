@@ -78,9 +78,9 @@ impl RepoSpec {
         let name = slug(label);
         let prefix = self.branch_prefix.trim_end_matches('/');
         let branch = if prefix.is_empty() {
-            name.clone()
+            format!("{name}/head")
         } else {
-            format!("{prefix}/{name}")
+            format!("{prefix}/{name}/head")
         };
         (branch, self.resolved_worktree_root().join(name))
     }
@@ -99,6 +99,15 @@ impl RepoSpec {
         let git = self.git();
         let remote = self.remote.trim();
         let base_branch = self.base_branch.trim();
+        let (branch, path) = self.names(label);
+        let (ancestor, _) = branch.rsplit_once('/').expect("branch contains `/`");
+        if base_branch == ancestor || base_branch.starts_with(&format!("{ancestor}/")) {
+            return Err(Error::Config {
+                detail: format!(
+                    "configured base branch `{base_branch}` is at or under the run ref directory `{ancestor}`"
+                ),
+            });
+        }
         git.fetch(remote).await?;
         let remote_base = format!("{remote}/{base_branch}");
         let remote_sha = git.rev_parse(&remote_base).await?;
@@ -118,7 +127,11 @@ impl RepoSpec {
                 format!("local `{base_branch}` and `{remote_base}` diverged"),
             ));
         };
-        let (branch, path) = self.names(label);
+        if git.show_ref(&format!("refs/heads/{ancestor}")).await? {
+            return Err(Error::Path {
+                detail: format!("worktree collision: branch `{ancestor}` already exists"),
+            });
+        }
         if git.show_ref(&format!("refs/heads/{branch}")).await? {
             return Err(Error::Path {
                 detail: format!("worktree collision: branch `{branch}` already exists"),
@@ -136,13 +149,37 @@ impl RepoSpec {
         }
         git.worktree_add(&branch, &path, &base_sha).await?;
         let (git_dir, git_common_dir) = self.discover_git_dirs(&path).await?;
-        Ok(Worktree {
+        let worktree = Worktree {
             path,
             branch,
             base_sha,
             git_dir,
             git_common_dir,
-        })
+        };
+        let (run_ref_dir, run_reflog_dir) = worktree.run_ref_dirs()?;
+        let base_ref = worktree
+            .git_common_dir
+            .join("refs")
+            .join("heads")
+            .join(self.base_branch.trim());
+        if base_ref.starts_with(&run_ref_dir) {
+            let _ = git.worktree_remove(&worktree.path).await;
+            let _ = git.branch_delete(&worktree.branch).await;
+            return Err(Error::Config {
+                detail: format!(
+                    "configured base branch `{}` is at or under the run ref directory `{}`",
+                    self.base_branch,
+                    run_ref_dir.display()
+                ),
+            });
+        }
+        tokio::fs::create_dir_all(&run_ref_dir)
+            .await
+            .map_err(|error| Error::io(&run_ref_dir.display().to_string(), error))?;
+        tokio::fs::create_dir_all(&run_reflog_dir)
+            .await
+            .map_err(|error| Error::io(&run_reflog_dir.display().to_string(), error))?;
+        Ok(worktree)
     }
 
     /// Remove a worktree and its branch.
@@ -302,13 +339,95 @@ impl Worktree {
             })?;
         let base_sha = git.rev_parse("HEAD").await?;
         let (git_dir, git_common_dir) = git_directories(git).await?;
-        Ok(Worktree {
+        let worktree = Worktree {
             path: git.root().to_path_buf(),
             branch,
             base_sha,
             git_dir,
             git_common_dir,
-        })
+        };
+        if let Ok((run_ref_dir, run_reflog_dir)) = worktree.run_ref_dirs() {
+            tokio::fs::create_dir_all(&run_ref_dir)
+                .await
+                .map_err(|error| Error::io(&run_ref_dir.display().to_string(), error))?;
+            tokio::fs::create_dir_all(&run_reflog_dir)
+                .await
+                .map_err(|error| Error::io(&run_reflog_dir.display().to_string(), error))?;
+        }
+        Ok(worktree)
+    }
+
+    /// The run's ref directory (`<common>/refs/heads/<namespace>`) and reflog directory
+    /// (`<common>/logs/refs/heads/<namespace>`).
+    ///
+    /// # Errors
+    ///
+    /// Refuses a branch with no `/`, any `.`/`..`/absolute component, or a result that is not a
+    /// strict descendant of the heads roots.
+    pub(crate) fn run_ref_dirs(&self) -> Result<(PathBuf, PathBuf)> {
+        if !self.branch.contains('/') {
+            return Err(Error::Path {
+                detail: format!(
+                    "worktree branch `{}` has no namespace: missing `/` separator",
+                    self.branch
+                ),
+            });
+        }
+        let (namespace, _) = self.branch.rsplit_once('/').expect("branch contains `/`");
+        if namespace.is_empty() {
+            return Err(Error::Path {
+                detail: format!("worktree branch `{}` has an empty namespace", self.branch),
+            });
+        }
+        for component in Path::new(&self.branch).components() {
+            match component {
+                std::path::Component::Normal(part) => {
+                    let s = part.to_string_lossy();
+                    if s == "." || s == ".." {
+                        return Err(Error::Path {
+                            detail: format!(
+                                "worktree branch `{}` contains invalid path component `{s}`",
+                                self.branch
+                            ),
+                        });
+                    }
+                }
+                _ => {
+                    return Err(Error::Path {
+                        detail: format!(
+                            "worktree branch `{}` contains non-normal path components",
+                            self.branch
+                        ),
+                    });
+                }
+            }
+        }
+
+        let heads_root = self.git_common_dir.join("refs").join("heads");
+        let logs_root = self.git_common_dir.join("logs").join("refs").join("heads");
+        let run_ref_dir = heads_root.join(namespace);
+        let run_reflog_dir = logs_root.join(namespace);
+
+        if !run_ref_dir.starts_with(&heads_root) || run_ref_dir == heads_root {
+            return Err(Error::Path {
+                detail: format!(
+                    "run ref directory `{}` is not a strict descendant of `{}`",
+                    run_ref_dir.display(),
+                    heads_root.display()
+                ),
+            });
+        }
+        if !run_reflog_dir.starts_with(&logs_root) || run_reflog_dir == logs_root {
+            return Err(Error::Path {
+                detail: format!(
+                    "run reflog directory `{}` is not a strict descendant of `{}`",
+                    run_reflog_dir.display(),
+                    logs_root.display()
+                ),
+            });
+        }
+
+        Ok((run_ref_dir, run_reflog_dir))
     }
 }
 
@@ -347,7 +466,7 @@ mod tests {
     fn names_are_derived_from_the_label() {
         let spec = spec("/repo");
         let (branch, path) = spec.names("demo-93 run-1");
-        assert_eq!(branch, "agent/demo-93-run-1");
+        assert_eq!(branch, "agent/demo-93-run-1/head");
         assert_eq!(path, PathBuf::from("/repo/.worktrees/demo-93-run-1"));
     }
 

@@ -6,8 +6,33 @@ versioning once it has a released API.
 
 ## Unreleased
 
+### Security
+
+- **Per-run worktree refs and narrowed Git grants.** In worktree mode, `wrap_agent` now narrows Git metadata write
+  grants to a four-path allow-list: `objects`, the run's ref directory (`refs/heads/<prefix>/<label>/`), the run's
+  reflog directory (`logs/refs/heads/<prefix>/<label>/`), and the worktree git directory. Neither the root `refs/` nor
+  `logs/` directory is granted, closing the cross-run ref tampering path. Attempts to move refs outside the run's ref
+  directory (e.g. `refs/heads/main`) are denied by the sandbox. In-run `git fetch` and tag creation are denied because
+  their targets sit outside the run's ref directory; base updates are performed exclusively during integration outside
+  the sandbox.
+- **Nested worktree branch format and ref validation.** `RepoSpec::names` now generates nested branches of the form
+  `<prefix>/<label>/head` (or `<label>/head` when prefix is empty) while preserving the checkout directory at
+  `<worktree_root>/<label>`, isolating each run's ref namespace. `RepoSpec::prepare` and `Worktree::discover` validate
+  and create the run's ref and reflog directories and refuse ancestor collisions and base branches placed inside the
+  run's ref directory.
+
 ### Added
 
+- **Published profiles are addressed by scheme and `nono` floor, not raw bytes.** `profile_digest` hashes a scheme marker plus the minimum `nono` version with the rendered policy, so a scheme change or a higher floor yields a different published name and a stale copy can never be reused under an address that now means something else.
+- **The supervisor's network audit is readable per run.** `Sandbox::audit_session` correlates a
+  completed child with the supervisor's audit trail (the newest session whose child argv matches)
+  and parses its `network_events` into [`NetworkDecision`] values: allow/deny, denial category,
+  target, port, and the supervisor's reason. Correlation is observability, never authorization:
+  two concurrent identical commands can be confused, and a failure returns `None` rather than
+  failing the run.
+- **Grant validation refuses the dangerous shapes.** `wrap_agent`/`wrap_review` already refused a
+  relative checkout or grant; a writable grant that is an ancestor of the checkout is now refused
+  too, because it would hand the child the caller's tree (the checkout itself is the workdir grant).
 - `SandboxOptions` and `Sandbox::resolve_with`: the caller names the in-checkout run-control
   directory both embedded profiles deny (`state_dir`, default `.workcell`). The profiles are
   rendered before the content address is computed, published, and verified, so a custom state
@@ -114,6 +139,47 @@ versioning once it has a released API.
 
 ### Added
 
+- **`doctor` names the cold-cache trade.** Package caches are read-only, so a dependency that is
+  not already cached fails inside the sandbox instead of being fetched; `doctor` now says so and
+  points at the pre-fetch, rather than leaving the operator to discover it mid-run.
+- **`workcell::process::capture`** runs one child with bounded stdout/stderr capture, the
+  process-group kill, and no durable log (a throwaway file bounded by the log cap, removed before
+  returning). The verifier and `auth_check` now use it, so a repository-defined command cannot
+  exhaust the dispatcher's memory by printing, and a timeout signals its whole group.
+- **`auth_check` runs inside the sandbox.** An agent's optional `auth_check` was the last command
+  wirepuller executed with the deployment user's authority; it now launches through the read-only
+  review profile with only its own harness's caller-supplied grants. A check that must write its
+  cwd, or reach a host outside the reviewed allowlist, reports the agent unavailable rather than
+  running unconfined.
+- **Corrected: `doctor` no longer claims `workspace.state_root` moves the state directory.** That
+  setting relocates the archive/control file; the state directory follows the checkout, and worktree
+  mode is the actual fix for the shared-checkout rename residual.
+- **A verification profile.** `verify.profile.json` runs repository-defined verification with a
+  writable checkout, network denied, no harness configuration or keychain, and read-only package
+  caches; `Sandbox::wrap_verify` wraps a command for it, and preflight publishes and validates a
+  third profile. A deployment whose verification genuinely needs a network host adds it to this
+  reviewed profile — there is no runtime switch.
+
+### Changed
+
+- **Verification runs inside the sandbox.** Wirepuller's `[verify]` commands and acceptance probes
+  launch through `wrap_verify` and fail the check on a refusal, instead of executing with the
+  deployment user's authority. `auth_check` stays outside (it probes the harness login, not
+  repository code).
+- **The profiles are harness-neutral.** They no longer grant `~/.claude`, `~/.claude.json`,
+  `~/.codex`, `~/.gemini`, `~/.grok`, `~/.dsh`, `~/.antigravity`, or the login keychain. A caller
+  names the harness-owned paths its agent needs per run through `SandboxSpec::read_paths`,
+  `read_files`, and the new `bypass_protection`; the login keychain is granted only to the harness
+  that authenticates with it. This closes the cross-harness configuration read (a codex child can
+  no longer read Claude's configuration) and narrows the keychain to one harness. The change also
+  conforms the profiles to the crate's caller-neutrality rule.
+
+### Added
+
+- **`SandboxSpec::bypass_protection`**, wrapping `nono --bypass-protection` for a caller-supplied
+  protected file (the macOS keychain), validated to be absolute like every other grant.
+- **`listen` flags in the example** (caller-supplied `--read-path`, `--read-file`,
+  `--bypass-protection`) so the manual harness matrix can reproduce each kind's grants.
 - **A bounded child log.** The pumps stop at `MAX_LOG_BYTES` (16 MiB, stdout and stderr together)
   and append a single truncation marker, so a child that prints forever can no longer fill the
   disk. Before: 52,428,800 bytes in produced a 52,429,394-byte log.

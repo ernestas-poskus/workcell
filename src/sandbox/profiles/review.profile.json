@@ -2,7 +2,7 @@
   "$schema": "https://nono.sh/schemas/nono-profile.schema.json",
   "meta": {
     "name": "workcell-review",
-    "description": "workcell review run: read-only checkout, toolchain and harness configuration (including the harness credential it must authenticate with), host credentials and repository instruction files denied. The checkout is never writable, so a review cannot commit or edit; only the named harness state (session databases, logs, caches) is writable so the CLI can start, and configuration stays unwritable so a review cannot persist a hook.",
+    "description": "workcell review run: read-only checkout, toolchain and harness configuration unwritable, host credentials and repository instruction files denied. As in the agent profile, harness configuration, credentials, and keychain access are caller-supplied per run rather than profile grants, so a review child reads only the harness it runs. The checkout is never writable, so a review cannot commit or edit; only named harness state (session databases, logs, caches) is writable so the CLI can start, and configuration stays unwritable so a review cannot persist a hook.",
     "author": "workcell"
   },
   "extends": "default",
@@ -67,20 +67,7 @@
     "read": [
       "$HOME/.cargo",
       "$HOME/.rustup",
-      "$HOME/.local/bin",
-      "$HOME/.claude",
-      "$HOME/.claude.json",
-      "$HOME/.codex",
-      "$HOME/.gemini",
-      "$HOME/.antigravity",
-      "$HOME/.grok",
-      "$HOME/.dsh",
-      "$HOME/Library/Keychains/login.keychain-db",
-      "$HOME/Library/Keychains/metadata.keychain-db"
-    ],
-    "bypass_protection": [
-      "$HOME/Library/Keychains/login.keychain-db",
-      "$HOME/Library/Keychains/metadata.keychain-db"
+      "$HOME/.local/bin"
     ],
     "deny": [
       "$WORKDIR/**/AGENTS.md",

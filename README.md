@@ -45,7 +45,7 @@ configuration key, environment variable, or constructor that runs an agent uncon
 | `worktree` | `RepoSpec` and `Worktree`: fetch the base, cut one isolated checkout and branch per unit of work, remove it, and prune. |
 | `gc` | Async, conservative collection of stale worktrees and branches, with a dry run and explicit protection for active work. |
 | `process` | One child process: async spawn, timeout, optional stall watchdog, bounded in-memory capture, full log file, and a two-stage process-group kill (`SIGTERM`, 5 s grace, `SIGKILL`). |
-| `sandbox` | The OS boundary: the external `nono` binary as a hard prerequisite, embedded agent and review profiles, a synchronous `resolve`, async `preflight` (publish the profiles, probe `nono --version`, validate both, prove the host), argv wrapping (`SandboxSpec::read_paths`, `writable_paths`, `read_files`, loopback connect and listen ports), environment scrubbing, refusal classification, and the shared-checkout Git-identity/configuration/hooks guard. `SandboxOptions::state_dir` names the caller's in-checkout run-control directory that both profiles deny. The policy is macOS Seatbelt-only in this release. |
+| `sandbox` | The OS boundary: the external `nono` binary as a hard prerequisite, embedded agent and review profiles, a synchronous `resolve`, async `preflight` (publish the profiles, probe `nono --version`, validate both, prove the host), argv wrapping (`SandboxSpec::read_paths`, `writable_paths`, `read_files`, loopback connect and listen ports, and the four-path Git metadata allow-list in worktree mode: `objects`, the run's ref directory, the run's reflog directory, and the worktree git directory), environment scrubbing, refusal classification, and the shared-checkout Git-identity/configuration/hooks guard. `SandboxOptions::state_dir` names the caller's in-checkout run-control directory that both profiles deny. The policy is macOS Seatbelt-only in this release. |
 | `instructions` | Async, bounded, root-confined reads of a checkout's instruction files. A path that resolves outside the checkout (including through a symlink) is refused. |
 | `fs` | Async bounded reads, atomic writes, and a no-clobber publish. |
 | `error` | One error type for every module; operator-facing detail, never a credential. |
@@ -175,15 +175,21 @@ under the caller's profile directory, so concurrent runs share one reviewed copy
 is refused rather than silently trusted. In brief:
 
 - **Contained:** writes outside the checkout except a coding agent's own harness state, logs, crash
-  reports, and read-only package caches; harness configuration is read-only, because a hook, MCP
-  server, or plugin planted there would run in the human's next session outside this sandbox;
-  credential stores stay denied; in-checkout instruction and configuration files are denied read
+  reports, and read-only package caches; the profiles grant **no** harness configuration or
+  credential path, because a hook, MCP server, or plugin planted there would run in the human's
+  next session outside this sandbox — the caller supplies the harness-specific reads, read-files,
+  and protection bypass for the one harness a run uses, so a child cannot read another harness's
+  configuration or credential; the login keychain stays denied unless a caller names it for the
+  harness that authenticates with it; in-checkout instruction and configuration files are denied read
   and write; egress is limited to a curated provider allowlist; a child is killed as a process
   group.
-- **Exposed and not contained:** the shared kernel; an unsandboxed verifier that executes what the
-  run wrote; the macOS pasteboard and login-keychain items; shared Git refs; a shared checkout's
-  `.git`, which is guarded rather than contained; and the caller's own process, which `workcell`
-  does not sandbox.
+- **Exposed and not contained:** the shared kernel; verification runs in its own profile (network
+  and credentials denied) but still writes the checkout it was handed; a harness `auth_check` runs
+  in the read-only review profile with only that harness's grants; the macOS pasteboard, and the login-keychain
+  item a claude run is granted by the caller (an item secret is retrievable inside that run);
+  shared-checkout refs (in worktree mode refs are contained to the run's ref directory); the shared object
+  store; a shared checkout's `.git`, which is guarded rather than contained; and the caller's own
+  process, which `workcell` does not sandbox.
 
 The full policy — every grant and denial, the residuals, and why each unusual grant exists — is
 [`docs/security-model.md`](docs/security-model.md). The threat model behind it, the escape-testing
@@ -207,6 +213,9 @@ method, the per-hypothesis verdicts, and the upstream research are in [`docs/`](
 - **Shared-checkout `.git` is detected, not contained.** Guard detection covers `.git/config`,
   `.git/config.worktree`, `.git/info`, and hooks; refs and objects remain writable by design, so
   worktree mode or an outer boundary is the stronger choice.
+- **In worktree mode, refs are contained to the run's ref directory.** Writes outside
+  `refs/heads/<prefix>/<label>/` and its reflogs are denied; shared-checkout refs and shared object
+  stores remain named residuals.
 - **Egress is a hostname allowlist, not a content policy.** `nono`'s proxy opens plain-host
   `CONNECT` tunnels for the listed provider hosts and refuses the rest. MCP and plugin domains were
   not exercised and are refused until added.
@@ -234,7 +243,7 @@ method, the per-hypothesis verdicts, and the upstream research are in [`docs/`](
 | [`docs/live-drill.md`](docs/live-drill.md) | Dated live results and policy-variant experiments, with their limits. |
 | [`docs/performance.md`](docs/performance.md) | Wrapper cost on one host, where it comes from, and how to re-measure. |
 | [`docs/sandbox-hypotheses.md`](docs/sandbox-hypotheses.md) | One row per hypothesis with its verdict: refuted, confirmed, or needing a live probe. |
-| [`docs/research/`](docs/research) | The upstream research: macOS Seatbelt, `nono` 0.80.0, and the crate's own audit. |
+| [`docs/research/`](docs/research/README.md) | The research corpus: macOS Seatbelt, `nono` 0.80.0, the crate's own audit, and the harness surfaces the profiles encode (claude, codex, agy). |
 
 ## Examples
 

@@ -20,7 +20,7 @@ resolves, but a raw path should be pinned to the tag and the current org.
 `[fact][high]` **macOS (Seatbelt).** `nono` does **not** write a `.sb` file or shell out to
 `sandbox-exec`. It assembles an SBPL profile **string at runtime**, calls Apple's private
 `sandbox_init()` through FFI (`unsafe extern "C" { fn sandbox_init(...) }`,
-`crates/nono/src/sandbox/macos.rs` L24-26, L942-966), then execs. The base is `(deny default)`; it
+the `nono` crate's `src/sandbox/macos.rs` L24-26, L942-966), then execs. The base is `(deny default)`; it
 also uses `sandbox_extension_issue_file` / `sandbox_extension_consume` for
 `com.apple.app-sandbox.read*` extensions.
 
@@ -73,7 +73,7 @@ filesystem.deny`.
 
 `[fact][high]` A deny glob nested inside a writable grant works on macOS — it is compiled to an
 anchored Seatbelt `regex` emitting `deny file-read-data`, `deny file-write*`, `deny
-network-outbound` (`crates/nono-cli/src/policy.rs` L1004-1047), so it also covers files created
+network-outbound` (the `nono` CLI crate's `src/policy.rs` L1004-1047), so it also covers files created
 **after** sandbox start. On Linux the same profile only covers paths that existed at start, because
 Landlock has no deny primitive; the source warns about it and the schema says so.
 
@@ -92,7 +92,7 @@ This is the most misread key in the profile, so state it precisely.
 `[fact][high]` **`block: false` is not an "allow everything" switch, and `allow_domain` does not
 merely annotate — it activates the proxy.** Any of `network_profile`, `allow_domain`,
 `deny_domain`, `credentials`, or `upstream_proxy` activates proxy mode; activation sets
-`NetworkMode::ProxyOnly` (`crates/nono-cli/src/proxy_runtime.rs` L3094), which on macOS emits
+`NetworkMode::ProxyOnly` (the `nono` CLI crate's `src/proxy_runtime.rs` L3094), which on macOS emits
 `(deny network*)` followed by `(allow network-outbound (remote tcp "localhost:PORT"))`
 (`macos.rs` L866-895). `block` only adds the hard block on top.
 
@@ -136,8 +136,7 @@ an egress path, not a proxy bypass on its own.
 ## Child environment
 
 `[fact][high]` `nono` does **not** pass the parent environment through unfiltered: it calls
-`cmd.env_clear()` then re-adds surviving variables (`crates/nono-cli/src/exec_strategy.rs`
-L405-470). Dropped include: `LD_*`/`DYLD_*`, `BASH_ENV`/`ENV`/`CDPATH`/`GLOBIGNORE`/`BASH_FUNC_*`/
+`cmd.env_clear()` then re-adds surviving variables (the `nono` CLI crate's `src/exec_strategy.rs` L405-470). Dropped include: `LD_*`/`DYLD_*`, `BASH_ENV`/`ENV`/`CDPATH`/`GLOBIGNORE`/`BASH_FUNC_*`/
 `PROMPT_COMMAND`/`IFS`, `PYTHONPATH`/`PYTHONSTARTUP`, `NODE_OPTIONS`/`NODE_PATH`, `PERL5*`,
 `RUBYOPT`/`RUBYLIB`/`GEM_*`, `JAVA_TOOL_OPTIONS`/`_JAVA_OPTIONS`, `DOTNET_STARTUP_HOOKS`, `GOFLAGS`,
 `OP_*` tokens, and `NONO_CAP_FILE`/`NONO_SUPERVISOR_PATH`.
@@ -145,7 +144,7 @@ L405-470). Dropped include: `LD_*`/`DYLD_*`, `BASH_ENV`/`ENV`/`CDPATH`/`GLOBIGNO
 Passed through unchanged: `HOME`, `XDG_*`, `TMPDIR`, `USER`, `SSH_AUTH_SOCK`, `TERM`. The profile
 can add `allow_vars` / `deny_vars` / `set_vars` (`PATH` and `NONO_*` are reserved).
 
-`[fact][high]` `crates/nono/src/scrub.rs` is **output redaction only** ("output hygiene, not sandbox
+`[fact][high]` The `nono` crate's `src/scrub.rs` is **output redaction only** ("output hygiene, not sandbox
 policy") for diagnostics/audit — it is not child-env filtering.
 
 ## Launcher-environment knobs
@@ -234,9 +233,8 @@ Accessed 2026-10-28. Version: `nono` 0.80.0, tag `v0.80.0` (2026-10-13), macOS 2
 - Landlock internals — <https://nono.sh/docs/cli/internals/landlock>
 - Profile schema — `nono-profile.schema.json` at `v0.80.0`; groups/composition —
   <https://nono.sh/docs/cli/features/profiles-groups>
-- Source at `v0.80.0`: `crates/nono/src/sandbox/macos.rs` L24-26, L866-895, L942-966;
-  `crates/nono/src/sandbox/linux.rs`; `crates/nono-cli/src/proxy_runtime.rs` L3094;
-  `crates/nono-cli/src/policy.rs` L1004-1047; `crates/nono-cli/src/exec_strategy.rs` L405-470;
-  `crates/nono/src/scrub.rs`
+- Source at `v0.80.0`, read in the two workspace crates: the `nono` crate's `src/sandbox/macos.rs` L24-26,
+  L866-895, L942-966, `src/sandbox/linux.rs`, and `src/scrub.rs`; the `nono` CLI crate's
+  `src/proxy_runtime.rs` L3094, `src/policy.rs` L1004-1047, and `src/exec_strategy.rs` L405-470
 - Local static evaluation (no sandboxed child): `nono --version`, `nono run --dry-run -p …`,
   `nono why --path|--host …`, `nono run --allow '--profile=…'` (parse rejection).

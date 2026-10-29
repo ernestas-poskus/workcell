@@ -9,7 +9,10 @@ what the sandbox does — and what it does not — lives here rather than in a p
 | [`escape-testing.md`](escape-testing.md) | What the escape drill probes, the safety rules, how to run it, the static assertions, and the live results. |
 | [`live-drill.md`](live-drill.md) | Dated live results (real harnesses, egress, policy variants) and their limits. |
 | [`performance.md`](performance.md) | Wrapper cost on one host, where it comes from, and how to re-measure it. |
+| [`refusal-runbook.md`](refusal-runbook.md) | What each refusal means (preflight, guard trip, sandbox-refused run, unavailable verification), what to check, and the recovery. |
 | [`sandbox-hypotheses.md`](sandbox-hypotheses.md) | One row per hypothesis with its verdict: what was refuted, what was confirmed, and what still needs a live probe. |
+| [`research/`](research/README.md) | The research corpus index: the platform, the delegate, the crate audit, and the harness surfaces, with the version-scoping rule and provenance. |
+| [`research/harness/`](research/harness/README.md) | The harness surface behind the profiles: what claude 2.1.303, codex 0.163.0, and agy 1.4.5 read and write, their permission flags and exit-code traps, background behaviour, and version drift. |
 | [`research/macos-seatbelt.md`](research/macos-seatbelt.md) | The platform: nested-apply refusal, SBPL weaknesses, LaunchServices/launchd, AppleEvents, DYLD, CVEs (with a correction), deprecation. |
 | [`research/nono-0.80.0.md`](research/nono-0.80.0.md) | The delegate: architecture, profile semantics and precedence, the `network.block` correction, `open_port`, environment filtering, advisories. |
 | [`research/workcell-audit.md`](research/workcell-audit.md) | The crate's own code: findings with `file:line`, plus the refutations. |

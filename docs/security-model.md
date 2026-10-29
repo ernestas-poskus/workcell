@@ -40,10 +40,13 @@ what is verified before a launch.
   hook. Review launches also carry `--allow-cwd` so nono can start a non-interactive child against a
   read-only workdir.
 - In worktree mode, the repository's execution-semantics paths are outside the writable checkout and
-  are not granted. The agent gets `.git/objects`, `.git/refs`, `.git/logs`, and its own
-  `.git/worktrees/<name>` so that Git works; `.git/hooks`, `.git/config`, `.git/info`, and every
-  other worktree are neither granted nor reachable. A shared checkout is different: `.git` is
-  inside the writable checkout and only the guard protects it — see Honest limits.
+  are not granted. The agent receives four explicit Git metadata write grants: `.git/objects`, the run's
+  own ref directory under `.git/refs/heads/<prefix>/<label>/`, the run's reflog directory under
+  `.git/logs/refs/heads/<prefix>/<label>/`, and its own `.git/worktrees/<name>`. Neither the root `refs/`
+  nor `logs/` directory is granted, and other branch refs cannot be modified. Base branch updates (e.g. `main`)
+  are the caller's integration responsibility outside the agent sandbox. `.git/hooks`, `.git/config`,
+  `.git/info`, and every other worktree are neither granted nor reachable. A shared checkout is different:
+  `.git` is inside the writable checkout and only the guard protects it — see Honest limits.
 - Agent instruction and configuration files inside the checkout are denied **read and write**:
   `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.mcp.json`, and `.claude/`, `.codex/`,
   `.cursor/`, `.gemini/`, `.grok/`, `.agents/`. The instruction text the caller supplies is how those rules
@@ -108,10 +111,11 @@ what is verified before a launch.
   found that this Seatbelt profile refused to create a hardlink to a read-only-granted config from
   the writable checkout (`LINK_DENIED`), so the alternate-name path was closed in that probe; that
   is an observation on macOS 26.5.1 + nono 0.80.0, not a cross-platform guarantee.
-- **Shared-checkout `.git` is detected, not contained**, and **agents share
-  `refs`/`logs` write**: a run can move another branch's ref while it runs. Guard detection covers
-  `.git/config`, `.git/config.worktree`, `.git/info`, and hooks; refs and objects remain writable by
-  design, so worktree mode or an outer boundary is still the stronger choice.
+- **Shared-checkout `.git` is detected, not contained**, and **in shared-checkout mode refs remain writable**.
+  In worktree mode, refs are contained to the run's ref directory and cross-run ref tampering is closed.
+  In shared-checkout mode, guard detection covers `.git/config`, `.git/config.worktree`, `.git/info`, and hooks,
+  but refs and objects remain inside the writable checkout and writable across the repository by design;
+  worktree mode or an outer boundary is the stronger choice.
 - A caller that puts other state inside a shared checkout is responsible for keeping the agent
   away from it: the profile denies only the six run-control paths under
   `SandboxOptions::state_dir`.

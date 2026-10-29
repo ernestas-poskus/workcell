@@ -58,6 +58,44 @@ pub struct ProcessSpec {
     pub log_path: PathBuf,
 }
 
+/// Run one child with bounded capture and no durable log.
+///
+/// [`run`] appends both streams to a log because a run's log is its evidence. A caller that needs
+/// only the bounded capture — a verification command, an availability check — gets a throwaway
+/// file under the platform temp directory, still bounded by [`MAX_LOG_BYTES`] and
+/// [`CAPTURE_MAX_BYTES`], removed before returning; [`Outcome::log_path`] is then empty.
+///
+/// # Errors
+///
+/// As [`run`]: a missing binary, an unusable log target, or a process that cannot be spawned.
+pub async fn capture(
+    argv: Vec<String>,
+    cwd: PathBuf,
+    env: BTreeMap<String, String>,
+    timeout: Duration,
+) -> Result<Outcome> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let log_path = std::env::temp_dir().join(format!(
+        "workcell-capture-{}-{unique}.log",
+        std::process::id()
+    ));
+    let mut outcome = run(
+        ProcessSpec {
+            argv,
+            cwd,
+            env,
+            log_path: log_path.clone(),
+        },
+        timeout,
+    )
+    .await?;
+    let _ = tokio::fs::remove_file(&log_path).await;
+    outcome.log_path = PathBuf::new();
+    Ok(outcome)
+}
+
 /// How one child ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
@@ -772,5 +810,50 @@ mod tests {
             String::from_utf8_lossy(tail).contains("log truncated"),
             "the cap is marked so a reader knows why the log ends"
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capture_bounds_the_capture_and_leaves_no_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let args = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!("head -c {} /dev/zero", CAPTURE_MAX_BYTES + 1024 * 1024),
+        ];
+        let outcome = capture(
+            args,
+            dir.path().to_path_buf(),
+            BTreeMap::new(),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("capture");
+        assert!(outcome.succeeded());
+        assert_eq!(outcome.stdout.len(), CAPTURE_MAX_BYTES);
+        assert!(
+            outcome.log_path.as_os_str().is_empty(),
+            "a capture-only run keeps no log path: {:?}",
+            outcome.log_path
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_kills_the_group_on_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outcome = capture(
+            vec!["/bin/sleep".to_owned(), "3600".to_owned()],
+            dir.path().to_path_buf(),
+            BTreeMap::new(),
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("capture");
+        assert!(outcome.timed_out, "{outcome:?}");
+        assert_eq!(outcome.exit_code, None);
     }
 }

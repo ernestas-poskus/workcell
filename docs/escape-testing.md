@@ -87,7 +87,7 @@ The report is `results.tsv` and `report.json` with one row per probe:
 | network | direct egress, direct IP, allowlisted proxy reach, proxy bypass, loopback denied by the profile and granted by the caller, Docker socket (`--aggressive`), direct UDP/DNS |
 | guard | child writes `.git/hooks/post-commit`, appends `.git/config`, writes `.git/info/attributes`; guard detection; host `git commit` must not run the hook |
 | plumbing | child environment scrub, checkout readability, published-profile write |
-| worktree | linked-worktree commit, ref write (residual), shared Git config write |
+| worktree | linked-worktree commit, ref move denial (PASS), shared Git config write |
 | review | checkout read/write, keychain read, loopback reach, direct egress |
 
 ## Results
@@ -141,27 +141,29 @@ scripts/escape-drill.sh --suite all --mode both --aggressive --out /tmp/escape-a
 
 | Run | Classification |
 |---|---|
-| safe | **26 `PASS`/`DENIED`, 4 `FINDING`, 4 `SKIP`, 0 `FAIL`, 0 `UNKNOWN`**, exit 0 |
-| `--aggressive` | **27 `PASS`/`DENIED`, 5 `FINDING`, 3 `SKIP`, 0 `FAIL`, 0 `UNKNOWN`**, exit 0 |
+| safe | **27 `PASS`/`DENIED`, 3 `FINDING`, 4 `SKIP`, 0 `FAIL`, 0 `UNKNOWN`**, exit 0 |
+| `--aggressive` | **28 `PASS`/`DENIED`, 4 `FINDING`, 3 `SKIP`, 0 `FAIL`, 0 `UNKNOWN`**, exit 0 |
 
 **What the narrowing changed, measured.** `cargo_cache_write` moved from `FINDING` to **`PASS`**: the
 child can no longer write `~/.cargo/registry`. The old `loopback_service` row split into
 `loopback_denied` **`PASS`** (the profile alone reaches no local service) and `loopback_granted`
-**`PASS`** (the same service is reachable once the caller grants `--loopback 0`). Both halves are now
+**`PASS`** (the same service is reachable once the caller grants `--loopback 0`). `worktree_refs`
+moved from `FINDING` to **`PASS`/`DENIED`**: the sandbox now grants only the run's ref directory,
+so an attempt to move `refs/heads/main` is denied. Both halves are now
 proven rather than implied.
 
 A later run with the state-rename and keychain probes and `ESCAPE_KEYCHAIN_SERVICE` set classified
-**26 `PASS`/`DENIED`, 6 `FINDING`, 4 `SKIP`, 0 `FAIL`, 0 `UNKNOWN`**. The newest run adds
-`setsid_daemon` and `cross_harness_read` and classifies **26 / 7 / 5 / 0 / 0**; both new probes
+**27 `PASS`/`DENIED`, 5 `FINDING`, 4 `SKIP`, 0 `FAIL`, 0 `UNKNOWN`**. The newest run adds
+`setsid_daemon` and `cross_harness_read` and classifies **27 / 6 / 5 / 0 / 0**; both new probes
 report `FINDING`, which is the recorded residual: `state_dir_rename` and
 `keychain_item` both reported `FINDING`, which is the recorded residual, not a regression. Without
 the service variable `keychain_item` reports `SKIP`; the pre-probe numbers above are kept so the
 earlier run stays comparable.
 
 **Remaining findings, all documented residuals:** `harness_snapshot_write` (Claude sources shell
-snapshots; the write grant remains), `keychain_read`, `harness_credentials`, `worktree_refs`, plus
+snapshots; the write grant remains), `keychain_read`, `harness_credentials`, plus
 `clipboard_read` under `--aggressive` (the pasteboard is readable under 0.80.0 and the profile has no
-grant primitive for it).
+grant primitive for it). `worktree_refs` is now an expected denial (`PASS`/`DENIED`).
 
 **`profile_tamper` is `SKIP`, and that is the honest result.** The child cannot discover the published
 profile: process enumeration does not yield the supervisor's argv, and the profile directory is
@@ -211,6 +213,14 @@ narrowing (agy), and the guard/re-verify fixes are covered in `sandbox-hypothese
 residual rows are recorded as residuals, not fixed: a path deny cannot follow an inode, and the
 keychain grant is what makes claude authenticate (P5). The drill gained `state_dir_rename` and
 `keychain_item` (set `ESCAPE_KEYCHAIN_SERVICE`) so both stay observable.
+
+### Probe expectations after the harness-neutral profiles
+
+The drill's `harness_credentials`, `cross_harness_read`, and `keychain_item` probes exercised profile
+grants that no longer exist: the example grants no harness path, so all three now report `PASS`
+(denied). To probe with a caller grant, pass the example's `--read-path`/`--read-file`/
+`--bypass-protection` flags; the auth-subcommand experiments do exactly that and are recorded in
+`sandbox-hypotheses.md` F11.
 
 ## Interpretation and residuals
 
