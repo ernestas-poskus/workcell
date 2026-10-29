@@ -2,6 +2,10 @@
 
 A sandboxed, git-backed workspace for running untrusted coding agents.
 
+[![crates.io](https://img.shields.io/crates/v/workcell.svg)](https://crates.io/crates/workcell)
+[![docs.rs](https://docs.rs/workcell/badge.svg)](https://docs.rs/workcell)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `workcell` is a library, not a service. It owns the parts of a coding-agent runtime that do not
 depend on a task tracker, a model provider, or a review workflow: an in-process git2 Git runner,
 one Git worktree per unit of work, conservative garbage collection, bounded child-process
