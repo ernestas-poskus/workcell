@@ -862,6 +862,34 @@ impl Git {
         .await
     }
 
+    /// A digest of this worktree's private config file, or `"absent"`.
+    ///
+    /// A linked worktree may carry `.git/worktrees/<name>/config.worktree`, and the sandbox grants
+    /// the agent write access to that directory. Hashing it (rather than the shared common config,
+    /// which the agent cannot write) is the worktree-mode guard's configuration surface.
+    pub async fn worktree_config_digest(&self) -> Result<String> {
+        let root = self.root.clone();
+        self.run("git config --worktree", move || {
+            let repo = open(&root)?;
+            let path = repo.path().join("config.worktree");
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok("absent".to_owned());
+                }
+                Err(error) => return Err(Error::io(&path.display().to_string(), error)),
+            };
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            Ok(hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>())
+        })
+        .await
+    }
+
     /// The value of one repository-local configuration key, or `None` when it is unset.
     ///
     /// Used by the shared-checkout guard to find a configured hooks directory, so the surface it

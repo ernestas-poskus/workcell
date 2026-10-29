@@ -32,6 +32,15 @@ pub enum Error {
         /// What happened.
         detail: String,
     },
+    /// The sandbox cannot initialize because this process is already inside one.
+    ///
+    /// This is a distinct condition from a missing or unsupported sandbox: no configuration or
+    /// retry can fix it, and the operator must run the caller from a plain host shell.
+    #[error("nested sandbox: {detail}")]
+    NestedSandbox {
+        /// What failed, and the remediation.
+        detail: String,
+    },
     /// The caller's configuration cannot mean what it says.
     #[error("configuration: {detail}")]
     Config {

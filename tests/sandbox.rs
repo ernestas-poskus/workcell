@@ -2511,3 +2511,64 @@ fn wrap_refuses_an_egress_grant_that_is_not_a_bare_hostname() {
         );
     }
 }
+
+#[tokio::test]
+async fn the_worktree_guard_ignores_common_config_but_watches_the_worktree_config() {
+    let root = TempDir::new().expect("a temporary directory");
+    init_repository(root.path());
+    let worktree_path = root.path().join("linked");
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root.path())
+        .args([
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "guard-test",
+            worktree_path.to_str().expect("utf-8 path"),
+        ])
+        .status()
+        .expect("git worktree add");
+    assert!(status.success());
+
+    let git = Git::new(&worktree_path);
+    let snapshot = Sandbox::guard_snapshot_worktree(&git)
+        .await
+        .expect("worktree snapshot");
+    Sandbox::guard_verify_worktree(&git, &snapshot)
+        .await
+        .expect("an untouched worktree passes");
+
+    let mut common = std::fs::read_to_string(root.path().join(".git").join("config"))
+        .expect("read common config");
+    common.push_str("\n[workcell-test]\n\tplanted = true\n");
+    std::fs::write(root.path().join(".git").join("config"), common).expect("plant common config");
+    Sandbox::guard_verify_worktree(&git, &snapshot)
+        .await
+        .expect("a shared-checkout config change is outside the worktree guard");
+
+    let before = {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["config", "extensions.worktreeConfig", "true"])
+            .status()
+            .expect("enable worktree config");
+        assert!(status.success());
+        Sandbox::guard_snapshot_worktree(&git)
+            .await
+            .expect("snapshot after enabling worktree config")
+    };
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree_path)
+        .args(["config", "--worktree", "workcell-test.planted", "true"])
+        .status()
+        .expect("write worktree config");
+    assert!(status.success());
+    let error = Sandbox::guard_verify_worktree(&git, &before)
+        .await
+        .expect_err("a changed worktree config must fail the worktree guard");
+    assert!(error.to_string().contains("worktree"), "{error}");
+}

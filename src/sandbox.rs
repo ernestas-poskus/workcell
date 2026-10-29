@@ -124,6 +124,9 @@ const PROFILE_VALIDATE_TIMEOUT_SECS: u64 = 30;
 /// The prefix that versions a [`Sandbox::guard_snapshot`] string.
 const GUARD_SNAPSHOT_PREFIX: &str = "v4";
 
+/// The prefix for a worktree-scoped guard snapshot.
+const WORKTREE_GUARD_SNAPSHOT_PREFIX: &str = "v5";
+
 /// Makes temporary file names unique inside one process.
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -645,6 +648,45 @@ impl Sandbox {
         })
     }
 
+    /// Snapshot only the surfaces a sandboxed worktree agent can write.
+    ///
+    /// In worktree mode the common Git directory is outside the writable checkout, so a concurrent
+    /// change to the integration checkout's local config or hooks is not this run's attack
+    /// surface. The run's own worktree config, its `.git` pointer, and its Git directories are the
+    /// surfaces the sandbox grants and therefore the ones this guard watches.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sandbox`] when the worktree config or repository identity cannot be read.
+    pub async fn guard_snapshot_worktree(git: &Git) -> Result<String> {
+        let surfaces = worktree_guard_surfaces(git).await?;
+        Ok(worktree_snapshot_text(&surfaces))
+    }
+
+    /// Refuse when a worktree-scoped guard surface changed since [`Self::guard_snapshot_worktree`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sandbox`] naming the changed worktree surface, or when the snapshot is not this
+    /// guard's format or cannot be read back.
+    pub async fn guard_verify_worktree(git: &Git, expected: &str) -> Result<()> {
+        let current = worktree_guard_surfaces(git).await?;
+        if worktree_snapshot_text(&current) == expected {
+            return Ok(());
+        }
+        let parsed = parse_worktree_snapshot(expected).ok_or_else(invalid_guard_snapshot)?;
+        let mut changed = changed_surfaces(&parsed, &current);
+        if changed.is_empty() {
+            changed.push("the worktree's git configuration or repository identity");
+        }
+        Err(Error::Sandbox {
+            detail: format!(
+                "{} changed while the agent ran (worktree `.git` guard); refusing to continue",
+                changed.join(" and ")
+            ),
+        })
+    }
+
     /// Build the deterministic `nono` argv for one launch.
     ///
     /// In worktree mode with Git grants enabled, grants read access to the common Git directory and
@@ -837,16 +879,23 @@ impl Sandbox {
         if output.status.success() {
             return Ok(());
         }
-        Err(Error::Sandbox {
-            detail: format!(
-                "this host cannot enforce a nono sandbox (`nono setup --check-only` exited {}): {}; likely causes: an unsupported macOS or Linux version, a kernel without the required sandbox API, or a process that is already inside an OS sandbox — a nested sandbox cannot be initialized, so run the caller from a plain host shell",
-                output.status,
-                diagnostic_tail(
-                    &String::from_utf8_lossy(&output.stdout),
-                    &String::from_utf8_lossy(&output.stderr),
-                ),
-            ),
-        })
+        let diagnostic = diagnostic_tail(
+            &String::from_utf8_lossy(&output.stdout),
+            &String::from_utf8_lossy(&output.stderr),
+        );
+        let nested = diagnostic.to_ascii_lowercase().contains("nested")
+            || diagnostic
+                .to_ascii_lowercase()
+                .contains("operation not permitted");
+        let detail = format!(
+            "this host cannot enforce a nono sandbox (`nono setup --check-only` exited {}): {}; likely causes: an unsupported macOS or Linux version, a kernel without the required sandbox API, or a process that is already inside an OS sandbox — a nested sandbox cannot be initialized, so run the caller from a plain host shell",
+            output.status, diagnostic,
+        );
+        if nested {
+            Err(Error::NestedSandbox { detail })
+        } else {
+            Err(Error::Sandbox { detail })
+        }
     }
 
     /// `nono profile validate <published agent profile>`.
@@ -1822,6 +1871,63 @@ async fn guard_git_directories(git: &Git) -> Result<GitDirectories> {
         detail: format!(
             "the shared-checkout guard cannot resolve the repository's Git directories: {error}; refusing to continue because the repository's hooks cannot be observed"
         ),
+    })
+}
+
+/// The worktree-scoped guard surfaces: private config, identity, and explicit empty hooks/info.
+async fn worktree_guard_surfaces(git: &Git) -> Result<GuardSurfaces> {
+    let config = git
+        .worktree_config_digest()
+        .await
+        .map_err(|error| Error::Sandbox {
+            detail: format!(
+                "the worktree guard cannot read the worktree configuration: {error}; refusing to continue because a changed configuration could execute outside the sandbox"
+            ),
+        })?;
+    let directories = guard_git_directories(git).await?;
+    let pointer = read_dot_git_entry(&git.root().join(".git")).await?;
+    Ok(GuardSurfaces {
+        config,
+        hooks: "not-writable-in-worktree-mode".to_owned(),
+        repo: framed_sha(&[
+            directories.git_dir.display().to_string().as_bytes(),
+            directories.common_dir.display().to_string().as_bytes(),
+            pointer.as_slice(),
+        ]),
+        info: "not-writable-in-worktree-mode".to_owned(),
+    })
+}
+
+/// The worktree guard's framed snapshot string.
+fn worktree_snapshot_text(surfaces: &GuardSurfaces) -> String {
+    format!(
+        "{WORKTREE_GUARD_SNAPSHOT_PREFIX}:{}:{}:{}:{}",
+        surfaces.config, surfaces.hooks, surfaces.repo, surfaces.info
+    )
+}
+
+/// Parse a v5 worktree guard snapshot.
+fn parse_worktree_snapshot(snapshot: &str) -> Option<GuardSnapshot<'_>> {
+    let rest = snapshot.strip_prefix(WORKTREE_GUARD_SNAPSHOT_PREFIX)?;
+    let rest = rest.strip_prefix(':')?;
+    let mut parts = rest.split(':');
+    let config = parts.next()?;
+    let hooks = parts.next()?;
+    let repo = parts.next()?;
+    let info = parts.next()?;
+    if parts.next().is_some()
+        || config.is_empty()
+        || hooks.is_empty()
+        || repo.is_empty()
+        || info.is_empty()
+    {
+        return None;
+    }
+    Some(GuardSnapshot {
+        config,
+        hooks,
+        repo,
+        info,
     })
 }
 
