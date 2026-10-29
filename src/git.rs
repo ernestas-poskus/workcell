@@ -23,8 +23,9 @@ use std::time::{Duration, Instant};
 
 use git2::{
     BranchType, Config, DiffFindOptions, DiffFormat, DiffOptions, DiffStatsFormat, ErrorCode,
-    FetchOptions, FetchPrune, Oid, RebaseOperationType, RebaseOptions, RemoteCallbacks, Repository,
-    ResetType, Signature, StatusOptions, WorktreeAddOptions, WorktreePruneOptions,
+    FetchOptions, FetchPrune, IndexAddOption, Oid, RebaseOperationType, RebaseOptions,
+    RemoteCallbacks, Repository, ResetType, Signature, StatusOptions, WorktreeAddOptions,
+    WorktreePruneOptions,
 };
 use sha2::{Digest, Sha256};
 use tokio::task;
@@ -630,6 +631,70 @@ impl Git {
                 .iter()
                 .map(|entry| path_from_bytes(entry.path_bytes()))
                 .collect())
+        })
+        .await
+    }
+
+    /// Stage every change in the working tree and commit it on `HEAD`.
+    ///
+    /// This is the dispatch plane's completion fallback: an agent that edited the worktree but
+    /// did not commit must not lose its work when the run is judged. The commit uses the runner's
+    /// configured author/committer signature; callers that need an agent identity should provide
+    /// `GIT_COMMITTER_*` in the runner environment.
+    ///
+    /// A clean tree is not an error: the method commits only when `status()` reports changes.
+    /// Returns the new commit id, or `None` when there was nothing to commit.
+    pub async fn commit_all(&self, message: &str) -> Result<Option<String>> {
+        let root = self.root.clone();
+        let env = self.env.clone();
+        let message = message.to_owned();
+        self.run("git commit", move || {
+            let repo = open(&root)?;
+            let mut options = StatusOptions::new();
+            options
+                .include_untracked(true)
+                .renames_head_to_index(true)
+                .renames_index_to_workdir(true);
+            let statuses = repo
+                .statuses(Some(&mut options))
+                .map_err(|error| git_error("git status --porcelain", error))?;
+            if statuses.is_empty() {
+                return Ok(None);
+            }
+            let mut index = repo
+                .index()
+                .map_err(|error| git_error("git commit", error))?;
+            // Update tracked entries (including deletions) and add untracked files. The pathspec
+            // `*` is intentionally broad: this is the run's own worktree, not the integration
+            // checkout.
+            index
+                .update_all(["*"].iter(), None)
+                .map_err(|error| git_error("git commit", error))?;
+            index
+                .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
+                .map_err(|error| git_error("git commit", error))?;
+            index
+                .write()
+                .map_err(|error| git_error("git commit", error))?;
+            let tree_id = index
+                .write_tree()
+                .map_err(|error| git_error("git commit", error))?;
+            let tree = repo
+                .find_tree(tree_id)
+                .map_err(|error| git_error("git commit", error))?;
+            let parent = head_commit(&repo)?;
+            let signature = committer_signature(&repo, &env)?;
+            let oid = repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    &message,
+                    &tree,
+                    &[&parent],
+                )
+                .map_err(|error| git_error("git commit", error))?;
+            Ok(Some(oid.to_string()))
         })
         .await
     }

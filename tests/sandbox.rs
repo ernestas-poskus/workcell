@@ -1066,6 +1066,7 @@ fn wrap_agent_is_deterministic_and_grants_only_the_git_metadata() {
         read_files: vec![mcp.as_path()],
         loopback_ports: vec![8787, 9876],
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -1188,6 +1189,7 @@ fn wrap_refuses_a_worktree_branch_without_a_slash() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -1218,6 +1220,7 @@ fn wrap_agent_without_a_worktree_adds_no_git_grants() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -1248,6 +1251,7 @@ fn wrap_review_uses_the_read_only_profile_and_no_git_grants() {
         read_files: Vec::new(),
         loopback_ports: vec![9],
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -1307,6 +1311,7 @@ fn wrap_refuses_an_empty_argv() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -1336,6 +1341,7 @@ fn the_wrapped_argv_executes_the_child_after_the_separator() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -1798,6 +1804,7 @@ async fn real_nono_resolves_preflights_and_launches_a_child() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -1956,6 +1963,7 @@ fn wrap_refuses_a_worktree_grant_that_is_not_the_named_entry() {
             read_files: Vec::new(),
             loopback_ports: Vec::new(),
             listen_ports: Vec::new(),
+            allow_domains: Vec::new(),
             bypass_protection: Vec::new(),
             writable_paths: Vec::new(),
         };
@@ -2144,6 +2152,7 @@ fn wrap_agent_grants_listen_without_connect() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: vec![0],
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -2174,6 +2183,7 @@ fn wrap_refuses_a_relative_grant() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -2196,6 +2206,7 @@ fn wrap_refuses_a_relative_checkout() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -2219,6 +2230,7 @@ fn wrap_grants_a_caller_supplied_protection_bypass() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: vec![keychain],
         writable_paths: Vec::new(),
     };
@@ -2245,6 +2257,7 @@ fn wrap_verify_uses_the_verification_profile() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: Vec::new(),
     };
@@ -2331,6 +2344,7 @@ fn wrap_refuses_a_writable_grant_above_the_checkout() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: vec![&ancestor],
     };
@@ -2351,6 +2365,7 @@ fn wrap_refuses_a_writable_grant_above_the_checkout() {
         read_files: Vec::new(),
         loopback_ports: Vec::new(),
         listen_ports: Vec::new(),
+        allow_domains: Vec::new(),
         bypass_protection: Vec::new(),
         writable_paths: vec![&sibling],
     };
@@ -2438,4 +2453,61 @@ async fn audit_picks_the_newest_session_with_the_same_command_and_parses_decisio
             .await
             .is_none()
     );
+}
+
+#[test]
+fn wrap_grants_a_caller_supplied_egress_domain() {
+    let fake = FakeNono::new("0.80.0");
+    let root = TempDir::new().expect("a temporary directory");
+    let subject = resolve(&fake, &root);
+    let checkout = root.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    let spec = SandboxSpec {
+        checkout: &checkout,
+        worktree: None,
+        read_paths: Vec::new(),
+        read_files: Vec::new(),
+        loopback_ports: Vec::new(),
+        listen_ports: Vec::new(),
+        allow_domains: vec!["api.deepseek.com"],
+        bypass_protection: Vec::new(),
+        writable_paths: Vec::new(),
+    };
+    let argv = subject
+        .wrap_review(vec!["dsh".to_owned()], &spec)
+        .expect("wrap");
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--allow-domain", "api.deepseek.com"]),
+        "a caller-supplied egress grant must reach nono: {argv:?}"
+    );
+}
+
+#[test]
+fn wrap_refuses_an_egress_grant_that_is_not_a_bare_hostname() {
+    let fake = FakeNono::new("0.80.0");
+    let root = TempDir::new().expect("a temporary directory");
+    let subject = resolve(&fake, &root);
+    let checkout = root.path().join("checkout");
+    std::fs::create_dir_all(&checkout).expect("checkout");
+    for bad in ["https://example.com/x", "example.com:443", "has space"] {
+        let spec = SandboxSpec {
+            checkout: &checkout,
+            worktree: None,
+            read_paths: Vec::new(),
+            read_files: Vec::new(),
+            loopback_ports: Vec::new(),
+            listen_ports: Vec::new(),
+            allow_domains: vec![bad],
+            bypass_protection: Vec::new(),
+            writable_paths: Vec::new(),
+        };
+        let error = subject
+            .wrap_review(vec!["dsh".to_owned()], &spec)
+            .expect_err("a URL or port is not a hostname");
+        assert!(
+            error.to_string().contains("not a bare hostname"),
+            "{bad}: {error}"
+        );
+    }
 }

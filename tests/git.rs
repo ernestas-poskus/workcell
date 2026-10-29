@@ -624,3 +624,27 @@ fn plant_hook(root: &Path, name: &str, body: &str) -> PathBuf {
     }
     path
 }
+
+#[tokio::test]
+async fn commit_all_stages_the_working_tree_on_head() {
+    let (_dir, root) = repo();
+    let git = runner(&root);
+    let before = git.head().await.expect("head");
+    assert_eq!(
+        git.commit_all("wirepuller: finish").await.expect("commit"),
+        None
+    );
+    std::fs::write(root.join("new.txt"), "new\n").expect("write");
+    std::fs::write(root.join("README.md"), "changed\n").expect("write");
+    let commit = git
+        .commit_all("wirepuller: finish")
+        .await
+        .expect("commit")
+        .expect("a commit");
+    assert_ne!(commit, before);
+    assert!(git.status().await.expect("status").is_empty());
+    let head = git.head().await.expect("head");
+    assert_eq!(head, commit);
+    let message = git_cmd(&root, &["log", "-1", "--format=%s"]);
+    assert_eq!(message, "wirepuller: finish");
+}

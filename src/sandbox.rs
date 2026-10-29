@@ -257,6 +257,13 @@ pub struct SandboxSpec<'a> {
     /// `--listen-port` grants the bind alone. A caller that does not know should grant
     /// [`SandboxSpec::loopback_ports`] instead, which is the wider capability.
     pub listen_ports: Vec<u16>,
+    /// Extra domain names the child may reach through the filtering proxy.
+    ///
+    /// The profile carries the reviewed provider set; this is the caller's addition for a
+    /// deployment-specific endpoint (a planning provider's `base_url`, a private mirror). Like
+    /// every other caller-supplied grant it widens the policy, so it is validated as a bare
+    /// hostname and recorded by the caller. Empty means the profile alone decides egress.
+    pub allow_domains: Vec<&'a str>,
 }
 
 /// What [`Sandbox::resolve_with`] renders the embedded profiles with.
@@ -722,6 +729,11 @@ impl Sandbox {
         for path in &spec.bypass_protection {
             wrapped.push("--bypass-protection".to_owned());
             wrapped.push(path_text(path, "a sandbox protection bypass")?.to_owned());
+        }
+        for domain in &spec.allow_domains {
+            validate_domain(domain)?;
+            wrapped.push("--allow-domain".to_owned());
+            wrapped.push((*domain).to_owned());
         }
         for port in &spec.loopback_ports {
             wrapped.push("--open-port".to_owned());
@@ -2201,6 +2213,31 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Check one caller-supplied egress domain is a bare hostname.
+///
+/// `nono` also accepts a URL with a path glob; this crate deliberately accepts only the hostname
+/// form, because a path glob is an egress rule the reviewed profile should carry, and a typo in a
+/// caller string must not silently widen or narrow the proxy filter.
+fn validate_domain(domain: &str) -> Result<()> {
+    let valid = !domain.is_empty()
+        && domain.len() <= 253
+        && domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..");
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::Sandbox {
+            detail: format!(
+                "`{domain}` is not a bare hostname; an egress grant must be a domain name, not a URL or a path glob"
+            ),
+        })
+    }
 }
 
 /// One argv element for a path; the wrapper's argv is UTF-8.

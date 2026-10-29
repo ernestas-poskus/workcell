@@ -148,6 +148,7 @@ pub async fn run_with_stall(
         stall_timeout,
         shutdown,
         on_spawn,
+        None,
         Arc::new(TokioStallClock),
     )
     .await
@@ -163,6 +164,34 @@ pub async fn run(spec: ProcessSpec, timeout: Duration) -> Result<Outcome> {
     // Keep the sender alive: a dropped sender is a shutdown request.
     let (_sender, mut shutdown) = watch::channel(false);
     run_with_stall(spec, timeout, Duration::ZERO, &mut shutdown, None).await
+}
+
+/// Run one child with `input` written to its stdin, to completion or its timeout.
+///
+/// Every other entry point gives the child `/dev/null`. This one carries a caller whose protocol
+/// is "prompt on stdin" (a planning harness): the write happens on its own task, so a child that
+/// does not read immediately cannot deadlock the supervisor, and the pipe is closed when the
+/// input ends so the child sees EOF.
+///
+/// # Errors
+///
+/// As [`run`].
+pub async fn run_with_input(
+    spec: ProcessSpec,
+    input: Vec<u8>,
+    timeout: Duration,
+) -> Result<Outcome> {
+    let (_sender, mut shutdown) = watch::channel(false);
+    run_with_stall_on(
+        spec,
+        timeout,
+        Duration::ZERO,
+        &mut shutdown,
+        None,
+        Some(input),
+        Arc::new(TokioStallClock),
+    )
+    .await
 }
 
 /// Time source for the stall watchdog's silence measurement.
@@ -197,6 +226,7 @@ async fn run_with_stall_on(
     stall_timeout: Duration,
     shutdown: &mut watch::Receiver<bool>,
     on_spawn: Option<&(dyn Fn(u32) + Send + Sync)>,
+    stdin: Option<Vec<u8>>,
     clock: Arc<dyn StallClock>,
 ) -> Result<Outcome> {
     let started = Instant::now();
@@ -227,7 +257,11 @@ async fn run_with_stall_on(
         .current_dir(&spec.cwd)
         .env_clear()
         .envs(&spec.env)
-        .stdin(std::process::Stdio::null())
+        .stdin(if stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -250,6 +284,13 @@ async fn run_with_stall_on(
     })?;
     if let (Some(on_spawn), Some(pid)) = (on_spawn, child.id()) {
         on_spawn(pid);
+    }
+    if let (Some(input), Some(mut child_stdin)) = (stdin, child.stdin.take()) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let _ = child_stdin.write_all(&input).await;
+            let _ = child_stdin.shutdown().await;
+        });
     }
     // The group leader's pid is captured now: after a normal exit `child.id()` is gone, but a
     // background child the agent left behind still belongs to this group and must not outlive the
@@ -682,6 +723,7 @@ mod tests {
                 stall_timeout,
                 &mut shutdown,
                 None,
+                None,
                 clock_clone,
             )
             .await
@@ -789,6 +831,7 @@ mod tests {
             Duration::from_secs(10),
             &mut shutdown,
             None,
+            None,
             clock,
         )
         .await
@@ -855,5 +898,29 @@ mod capture_tests {
         .expect("capture");
         assert!(outcome.timed_out, "{outcome:?}");
         assert_eq!(outcome.exit_code, None);
+    }
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn input_reaches_the_child_and_the_pipe_closes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = ProcessSpec {
+            argv: vec!["/bin/cat".to_owned()],
+            cwd: dir.path().to_path_buf(),
+            env: BTreeMap::new(),
+            log_path: dir.path().join("log"),
+        };
+        let outcome = run_with_input(spec, b"prompt body".to_vec(), Duration::from_secs(10))
+            .await
+            .expect("run");
+        assert!(outcome.succeeded(), "{outcome:?}");
+        assert!(
+            outcome.stdout.contains("prompt body"),
+            "the child never saw its stdin: {outcome:?}"
+        );
     }
 }

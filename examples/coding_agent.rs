@@ -149,6 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         read_files: harness_read_files.iter().map(PathBuf::as_path).collect(),
         loopback_ports,
         listen_ports,
+        allow_domains: Vec::new(),
         bypass_protection: harness_bypass.iter().map(PathBuf::as_path).collect(),
         writable_paths: codex_home.as_deref().into_iter().collect(),
     };
