@@ -54,6 +54,8 @@ configuration key, environment variable, or constructor that runs an agent uncon
 | `sandbox` | The OS boundary: the external `nono` binary as a hard prerequisite, embedded agent, review, and verify profiles, a synchronous `resolve`, async `preflight` (publish the profiles, probe `nono --version`, validate both, prove the host), argv wrapping (`SandboxSpec::read_paths`, `writable_paths`, `read_files`, caller-supplied egress domains, loopback connect and listen ports, and the four-path Git metadata allow-list in worktree mode: `objects`, the run's ref directory, the run's reflog directory, and the worktree git directory), environment scrubbing, refusal classification, and the shared-checkout Git-identity/configuration/hooks guard. `SandboxOptions::state_dir` names the caller's in-checkout run-control directory that both profiles deny. The policy is macOS Seatbelt-only in this release. |
 | `instructions` | Async, bounded, root-confined reads of a checkout's instruction files. A path that resolves outside the checkout (including through a symlink) is refused. |
 | `fs` | Async bounded reads, atomic writes, and a no-clobber publish. |
+| `launch` | An argv template with per-argument placeholders, and the child-environment policy (exact/prefix/suffix/substring denies). |
+| `verify` | One declared command through the bounded capture as a `Check`, the `Verification` aggregate, the porcelain-status parser, and bounded evidence tails. |
 | `error` | One error type for every module; operator-facing detail, never a credential. |
 
 ### Execution model
