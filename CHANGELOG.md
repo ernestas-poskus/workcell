@@ -23,6 +23,22 @@ versioning once it has a released API.
 
 ### Added
 
+- `launch`: `ArgvTemplate` / `render_argument` substitute `{name}` placeholders inside one argv
+  element, leaving unknown placeholders alone, and `EnvPolicy` scrubs a child environment by exact
+  name, prefix, suffix, and substring with no allow override. The caller supplies its own rules, so
+  the crate never learns what a credential or a tracker is.
+- `verify`: a generic command check — `run_command` runs one declared argv through the bounded
+  process capture and returns a `Check` (exit, timeout, bounded output tail, duration); `Verification`
+  aggregates checks; `parse_status` reads porcelain v1 status paths and `tail_bounded` /
+  `tail_characters` bound evidence text.
+
+- **Caller-supplied egress grants.** `SandboxSpec::allow_domains` adds a bare hostname to the
+  filtering proxy (`--allow-domain`) for a deployment-specific endpoint the reviewed profile
+  does not carry. It is validated as a hostname, never a URL or path glob, and it is a widening
+  grant like a read path: the caller records why it is there.
+- **`process::run_with_input`.** A child whose protocol is "prompt on stdin" gets its input
+  written on a task and the pipe closed afterwards; every other entry point still gives the
+  child `/dev/null`. Used by the planning child.
 - **Published profiles are addressed by scheme and `nono` floor, not raw bytes.** `profile_digest` hashes a scheme marker plus the minimum `nono` version with the rendered policy, so a scheme change or a higher floor yields a different published name and a stale copy can never be reused under an address that now means something else.
 - **The supervisor's network audit is readable per run.** `Sandbox::audit_session` correlates a
   completed child with the supervisor's audit trail (the newest session whose child argv matches)

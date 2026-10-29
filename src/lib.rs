@@ -17,6 +17,8 @@
 //! [`sandbox::DEFAULT_STATE_DIR`]) and rendered into the six state-path denials before the
 //! profiles are content-addressed, published, and verified.
 //! | [`instructions`] | Bounded, root-confined reads of a checkout's instruction files |
+//! | [`launch`] | An argv template with per-argument placeholders, and the child-environment policy |
+//! | [`verify`] | Running declared commands with bounded capture, the check record, and the status parser |
 //! | [`fs`] | Bounded reads and atomic/no-clobber writes |
 //!
 //! # Guarantees
@@ -51,6 +53,8 @@ pub mod fs;
 pub mod gc;
 pub mod git;
 pub mod instructions;
+pub mod launch;
 pub mod process;
 pub mod sandbox;
+pub mod verify;
 pub mod worktree;

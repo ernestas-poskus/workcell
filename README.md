@@ -7,7 +7,9 @@ A sandboxed, git-backed workspace for running untrusted coding agents.
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 `workcell` is a library, not a service. It owns the parts of a coding-agent runtime that do not
-depend on a task tracker, a model provider, or a review workflow: an in-process git2 Git runner,
+depend on a task tracker, a model provider, or a review workflow: an argv-template and
+child-environment policy, generic command verification with bounded capture, an in-process
+git2 Git runner,
 one Git worktree per unit of work, conservative garbage collection, bounded child-process
 execution, a bounded and root-confined instruction-file read, bounded and atomic file helpers, and
 an **always-on OS sandbox** around the agent process (macOS Seatbelt in this release). A caller
@@ -49,7 +51,7 @@ configuration key, environment variable, or constructor that runs an agent uncon
 | `worktree` | `RepoSpec` and `Worktree`: fetch the base, cut one isolated checkout and branch per unit of work, remove it, and prune. |
 | `gc` | Async, conservative collection of stale worktrees and branches, with a dry run and explicit protection for active work. |
 | `process` | One child process: async spawn, timeout, optional stall watchdog, bounded in-memory capture, full log file, and a two-stage process-group kill (`SIGTERM`, 5 s grace, `SIGKILL`). |
-| `sandbox` | The OS boundary: the external `nono` binary as a hard prerequisite, embedded agent and review profiles, a synchronous `resolve`, async `preflight` (publish the profiles, probe `nono --version`, validate both, prove the host), argv wrapping (`SandboxSpec::read_paths`, `writable_paths`, `read_files`, loopback connect and listen ports, and the four-path Git metadata allow-list in worktree mode: `objects`, the run's ref directory, the run's reflog directory, and the worktree git directory), environment scrubbing, refusal classification, and the shared-checkout Git-identity/configuration/hooks guard. `SandboxOptions::state_dir` names the caller's in-checkout run-control directory that both profiles deny. The policy is macOS Seatbelt-only in this release. |
+| `sandbox` | The OS boundary: the external `nono` binary as a hard prerequisite, embedded agent, review, and verify profiles, a synchronous `resolve`, async `preflight` (publish the profiles, probe `nono --version`, validate both, prove the host), argv wrapping (`SandboxSpec::read_paths`, `writable_paths`, `read_files`, caller-supplied egress domains, loopback connect and listen ports, and the four-path Git metadata allow-list in worktree mode: `objects`, the run's ref directory, the run's reflog directory, and the worktree git directory), environment scrubbing, refusal classification, and the shared-checkout Git-identity/configuration/hooks guard. `SandboxOptions::state_dir` names the caller's in-checkout run-control directory that both profiles deny. The policy is macOS Seatbelt-only in this release. |
 | `instructions` | Async, bounded, root-confined reads of a checkout's instruction files. A path that resolves outside the checkout (including through a symlink) is refused. |
 | `fs` | Async bounded reads, atomic writes, and a no-clobber publish. |
 | `error` | One error type for every module; operator-facing detail, never a credential. |
@@ -132,6 +134,7 @@ async fn run_one_agent() -> Result<()> {
             worktree: Some(&tree),
             read_paths: Vec::new(),
             writable_paths: Vec::new(),
+            allow_domains: Vec::new(),
             read_files: Vec::new(),
             loopback_ports: Vec::new(),
             listen_ports: Vec::new(),
