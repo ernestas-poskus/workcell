@@ -864,7 +864,7 @@ impl Git {
 
     /// A digest of this worktree's private config file, or `"absent"`.
     ///
-    /// A linked worktree may carry `.git/worktrees/<name>/config.worktree`, and the sandbox grants
+    /// A linked worktree may carry `.git/worktrees/<name>/config.worktree`, and the caller grants
     /// the agent write access to that directory. Hashing it (rather than the shared common config,
     /// which the agent cannot write) is the worktree-mode guard's configuration surface.
     pub async fn worktree_config_digest(&self) -> Result<String> {

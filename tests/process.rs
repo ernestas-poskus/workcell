@@ -155,7 +155,7 @@ async fn a_normal_exit_also_reaps_a_background_descendant() {
                 "/bin/sh",
                 "-c",
                 // The leader exits 0 immediately; its background child would touch `survived`
-                // one second later, inside the sandbox, after the caller's guard ran.
+                // one second later, inside the caller, after the caller's guard ran.
                 "(sleep 1; touch survived) & exit 0",
             ],
             dir.path(),

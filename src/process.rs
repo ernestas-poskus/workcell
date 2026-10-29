@@ -269,7 +269,7 @@ async fn run_with_stall_on(
     // the group*. A coding agent routinely spawns a shell, a formatter, or a `git` child;
     // signalling only the direct child leaves those holding the pipes and the run appears to hang
     // until they exit. A grandchild that calls `setsid` creates a new session and escapes the group
-    // kill (measured 2026-10-28): it stays inside the sandbox, but it can outlive the run.
+    // kill (measured 2026-10-28): it stays inside the caller, but it can outlive the run.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -328,7 +328,7 @@ async fn run_with_stall_on(
                 detail: format!("waiting for `{}` failed: {error}", spec.argv[0]),
             })?;
             // A normal exit is not proof the run is over: `agent &` or a shell that backgrounds a
-            // helper exits 0 while the group keeps running inside the sandbox. Reap the group
+            // helper exits 0 while the group keeps running inside the caller. Reap the group
             // before returning, so nothing the caller guards afterwards can be rewritten by a
             // leftover process.
             #[cfg(unix)]

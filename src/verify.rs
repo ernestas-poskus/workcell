@@ -8,7 +8,7 @@
 //!
 //! Nothing here runs a shell: a command is an argv array, and the child environment is the
 //! caller's scrubbed map ([`crate::launch::EnvPolicy`] decides it). The caller wraps the argv
-//! with whatever boundary the command must run behind (for example [`crate::sandbox`]); this
+//! directly in the checkout, with the caller responsible for any boundary; this
 //! module only spawns it through [`crate::process`], so capture and timeout are bounded for every
 //! command alike.
 

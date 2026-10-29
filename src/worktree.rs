@@ -4,7 +4,7 @@
 //! integration branch when it already contains the remote, the remote when the local branch can be
 //! fast-forwarded), refuses a dirty integration checkout or a colliding branch/worktree path, and
 //! cuts one new branch with `git worktree add -b`. The returned [`Worktree`] records the Git
-//! directory of the new checkout, so a sandbox policy can grant exactly that worktree and nothing
+//! directory of the new checkout, so a caller can grant exactly that worktree and nothing
 //! else in the common Git directory.
 
 use std::collections::BTreeMap;
@@ -314,7 +314,7 @@ impl Worktree {
     ///
     /// The branch, current commit, and Git directories come from `git`'s checkout. This is the
     /// entry point for a caller that already owns a checkout (for example a repair pass over a
-    /// worktree cut earlier) and needs the same [`Worktree`] grants the sandbox policy expects.
+    /// worktree cut earlier) and needs the same [`Worktree`] grants a caller expects.
     ///
     /// # Errors
     ///

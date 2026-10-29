@@ -9,7 +9,7 @@
 //! (`SIGTERM`, a short grace period, then `SIGKILL`). A coding agent routinely starts children of
 //! its own, so the group kill is what stops a `command &` from outliving the run.
 //!
-//! No sandbox is involved here: this example demonstrates the process layer on its own.
+//! This example demonstrates the process layer on its own.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
