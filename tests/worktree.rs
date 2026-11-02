@@ -365,3 +365,68 @@ async fn discover_creates_the_directories_for_a_pre_upgrade_branch() {
     assert!(ref_dir.is_dir(), "ref dir: {}", ref_dir.display());
     assert!(reflog_dir.is_dir(), "reflog dir: {}", reflog_dir.display());
 }
+
+#[tokio::test]
+async fn branches_with_prefix_filters_and_sorts() {
+    let (_dir, root, _remote) = repo();
+    git(&root, &["branch", "prefix/beta", "main"]);
+    git(&root, &["branch", "prefix/alpha", "main"]);
+    git(&root, &["branch", "other/gamma", "main"]);
+
+    let git = workcell::git::Git::new(&root);
+    let matched = git.branches_with_prefix("prefix/").await.expect("prefix");
+    assert_eq!(matched, vec!["prefix/alpha", "prefix/beta"]);
+
+    let all = git.branches_with_prefix("").await.expect("all");
+    assert_eq!(
+        all,
+        vec!["main", "other/gamma", "prefix/alpha", "prefix/beta"]
+    );
+}
+
+#[tokio::test]
+async fn worktree_add_existing_checks_out_branch_and_validates_path_and_branch() {
+    let (_dir, root, _remote) = repo();
+    git(&root, &["branch", "prefix/beta", "main"]);
+    commit(&root, "main-advance.txt", "advance\n");
+    let tip = git(&root, &["rev-parse", "prefix/beta"]);
+
+    let git = workcell::git::Git::new(&root);
+    let existing_path = root.join(".worktrees").join("existing");
+    git.worktree_add_existing("prefix/beta", &existing_path)
+        .await
+        .expect("worktree_add_existing");
+
+    let worktree_git = workcell::git::Git::new(&existing_path);
+    assert_eq!(worktree_git.head().await.as_deref(), Some(tip.as_str()));
+    assert_eq!(
+        worktree_git.branch_name().await.expect("branch").as_deref(),
+        Some("prefix/beta")
+    );
+
+    // Existing path fails
+    let error = git
+        .worktree_add_existing("prefix/beta", &existing_path)
+        .await
+        .expect_err("existing path");
+    match error {
+        Error::Path { detail } => {
+            assert!(detail.contains("already exists"), "{detail}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    // Missing branch fails
+    let missing_path = root.join(".worktrees").join("missing");
+    let error = git
+        .worktree_add_existing("missing-branch", &missing_path)
+        .await
+        .expect_err("missing branch");
+    match error {
+        Error::Path { detail } => {
+            assert!(detail.contains("not a local branch"), "{detail}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert!(!missing_path.exists());
+}

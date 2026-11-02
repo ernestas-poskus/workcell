@@ -509,6 +509,36 @@ impl Git {
         .await
     }
 
+    /// Every local branch whose name begins with `prefix`, sorted.
+    ///
+    /// An empty prefix returns every local branch. Non-UTF-8 branch names are skipped.
+    pub async fn branches_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let root = self.root.clone();
+        let prefix = prefix.to_owned();
+        self.run("git branch --list", move || {
+            let repo = open(&root)?;
+            let branches = repo
+                .branches(Some(BranchType::Local))
+                .map_err(|error| git_error("git branch --list", error))?;
+            let mut names = Vec::new();
+            for item in branches {
+                let (branch, _) = item.map_err(|error| git_error("git branch --list", error))?;
+                match branch.name() {
+                    Ok(Some(name)) => {
+                        if name.starts_with(&prefix) {
+                            names.push(name.to_owned());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Err(git_error("git branch --list", error)),
+                }
+            }
+            names.sort();
+            Ok(names)
+        })
+        .await
+    }
+
     /// Create a worktree at `path` on a new `branch` cut from `base`.
     pub async fn worktree_add(&self, branch: &str, path: &Path, base: &str) -> Result<()> {
         let root = self.root.clone();
@@ -526,28 +556,43 @@ impl Git {
             let branch_ref = repo
                 .branch(&branch, &base_commit, false)
                 .map_err(|error| git_error("git worktree add", error))?;
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| Error::Path {
-                    detail: format!(
-                        "the worktree path `{}` has no usable final component",
-                        path.display()
-                    ),
-                })?
-                .to_owned();
             let reference = branch_ref.into_reference();
-            let mut options = WorktreeAddOptions::new();
-            options.reference(Some(&reference));
-            match repo.worktree(&name, &path, Some(&options)) {
-                Ok(_) => Ok(()),
+            match add_worktree_reference(&repo, &path, &reference) {
+                Ok(()) => Ok(()),
                 Err(error) => {
                     if let Ok(mut branch) = repo.find_branch(&branch, BranchType::Local) {
                         let _ = branch.delete();
                     }
-                    Err(git_error("git worktree add", error))
+                    Err(error)
                 }
             }
+        })
+        .await
+    }
+
+    /// Check out an existing local `branch` into a new worktree at `path`.
+    pub async fn worktree_add_existing(&self, branch: &str, path: &Path) -> Result<()> {
+        let root = self.root.clone();
+        let branch = branch.to_owned();
+        let path = path.to_path_buf();
+        self.run("git worktree add", move || {
+            let repo = open(&root)?;
+            let branch_ref =
+                repo.find_branch(&branch, BranchType::Local)
+                    .map_err(|_| Error::Path {
+                        detail: format!("branch `{branch}` is not a local branch"),
+                    })?;
+            if path.exists() {
+                return Err(Error::Path {
+                    detail: format!("the worktree path `{}` already exists", path.display()),
+                });
+            }
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| Error::io(&parent.display().to_string(), error))?;
+            }
+            let reference = branch_ref.into_reference();
+            add_worktree_reference(&repo, &path, &reference)
         })
         .await
     }
@@ -622,6 +667,28 @@ impl Git {
             let mut options = StatusOptions::new();
             options
                 .include_untracked(true)
+                .renames_head_to_index(true)
+                .renames_index_to_workdir(true);
+            let statuses = repo
+                .statuses(Some(&mut options))
+                .map_err(|error| git_error("git status --porcelain", error))?;
+            Ok(statuses
+                .iter()
+                .map(|entry| path_from_bytes(entry.path_bytes()))
+                .collect())
+        })
+        .await
+    }
+
+    /// The tracked changed paths from `git status` (excluding untracked and ignored files).
+    pub async fn tracked_status(&self) -> Result<Vec<PathBuf>> {
+        let root = self.root.clone();
+        self.run("git status --porcelain", move || {
+            let repo = open(&root)?;
+            let mut options = StatusOptions::new();
+            options
+                .include_untracked(false)
+                .include_ignored(false)
                 .renames_head_to_index(true)
                 .renames_index_to_workdir(true);
             let statuses = repo
@@ -986,6 +1053,28 @@ impl Git {
             )),
         }
     }
+}
+
+/// Add a worktree checking out `reference` at `path`.
+fn add_worktree_reference(
+    repo: &Repository,
+    path: &Path,
+    reference: &git2::Reference<'_>,
+) -> Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::Path {
+            detail: format!(
+                "the worktree path `{}` has no usable final component",
+                path.display()
+            ),
+        })?;
+    let mut options = WorktreeAddOptions::new();
+    options.reference(Some(reference));
+    repo.worktree(name, path, Some(&options))
+        .map_err(|error| git_error("git worktree add", error))?;
+    Ok(())
 }
 
 /// The names of every linked worktree.

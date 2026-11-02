@@ -241,3 +241,154 @@ async fn the_report_and_the_worktree_list_agree_on_a_real_listing() {
         }
     }
 }
+
+#[tokio::test]
+async fn git_tracked_status_reports_tracked_edit_but_not_untracked_file() {
+    let (_dir, root) = repo();
+    let git = Git::new(&root).with_env(env());
+
+    assert!(git.status().await.expect("status").is_empty());
+    assert!(
+        git.tracked_status()
+            .await
+            .expect("tracked_status")
+            .is_empty()
+    );
+
+    std::fs::write(root.join("untracked.txt"), "untracked\n").expect("write untracked");
+    let untracked_path = PathBuf::from("untracked.txt");
+    assert_eq!(
+        git.status().await.expect("status"),
+        vec![untracked_path.clone()]
+    );
+    assert!(
+        git.tracked_status()
+            .await
+            .expect("tracked_status")
+            .is_empty()
+    );
+
+    std::fs::write(root.join("README.md"), "modified base\n").expect("write tracked");
+    let readme_path = PathBuf::from("README.md");
+    assert_eq!(
+        git.tracked_status().await.expect("tracked_status"),
+        vec![readme_path.clone()]
+    );
+    let mut all_status = git.status().await.expect("status");
+    all_status.sort();
+    assert_eq!(all_status, vec![readme_path, untracked_path]);
+}
+
+#[tokio::test]
+async fn reap_merged_removes_clean_merged_worktrees_with_untracked_residue() {
+    let (_dir, root) = repo();
+    let spec = spec(&root);
+
+    let untracked_residue = root.join(".worktrees/untracked");
+    let tracked_dirty = root.join(".worktrees/tracked-dirty");
+    let unmerged = root.join(".worktrees/unmerged");
+
+    add_worktree(&root, "agent/untracked", &untracked_residue, false);
+    std::fs::write(untracked_residue.join("build-residue.txt"), "residue\n")
+        .expect("write residue");
+
+    add_worktree(&root, "agent/tracked-dirty", &tracked_dirty, false);
+    std::fs::write(tracked_dirty.join("README.md"), "dirty\n").expect("modify tracked");
+
+    add_worktree(&root, "agent/unmerged", &unmerged, true);
+
+    // Default policy dry run skips untracked_residue as "dirty worktree"
+    let default_dry = gc(
+        &spec,
+        &GcPolicy {
+            dry_run: true,
+            ..GcPolicy::default()
+        },
+        &[],
+    )
+    .await
+    .expect("default dry");
+    assert!(default_dry.removed.is_empty());
+    assert!(default_dry.planned.is_empty());
+    assert!(default_dry.skipped.iter().any(|(p, r)| {
+        std::fs::canonicalize(p).ok() == std::fs::canonicalize(&untracked_residue).ok()
+            && r == "dirty worktree"
+    }));
+    assert!(default_dry.skipped.iter().any(|(p, r)| {
+        std::fs::canonicalize(p).ok() == std::fs::canonicalize(&tracked_dirty).ok()
+            && r == "dirty worktree"
+    }));
+    assert!(default_dry.skipped.iter().any(|(p, r)| {
+        std::fs::canonicalize(p).ok() == std::fs::canonicalize(&unmerged).ok()
+            && r == "branch is not merged into the base"
+    }));
+    assert!(untracked_residue.exists() && tracked_dirty.exists() && unmerged.exists());
+
+    // reap_merged dry run plans untracked_residue with nothing deleted
+    let merged_dry = gc(
+        &spec,
+        &GcPolicy {
+            dry_run: true,
+            reap_merged: true,
+            ..GcPolicy::default()
+        },
+        &[],
+    )
+    .await
+    .expect("merged dry");
+    assert!(merged_dry.removed.is_empty());
+    assert_eq!(merged_dry.planned.len(), 1, "{merged_dry:?}");
+    assert_eq!(
+        std::fs::canonicalize(&merged_dry.planned[0].path).expect("canon"),
+        std::fs::canonicalize(&untracked_residue).expect("canon")
+    );
+    assert!(merged_dry.skipped.iter().any(|(p, r)| {
+        std::fs::canonicalize(p).ok() == std::fs::canonicalize(&tracked_dirty).ok()
+            && r == "tracked changes in the worktree"
+    }));
+    assert!(merged_dry.skipped.iter().any(|(p, r)| {
+        std::fs::canonicalize(p).ok() == std::fs::canonicalize(&unmerged).ok()
+            && r == "branch is not merged into the base"
+    }));
+    assert!(untracked_residue.exists() && tracked_dirty.exists() && unmerged.exists());
+
+    // Real reap_merged run removes untracked_residue and its branch, but leaves tracked_dirty and unmerged
+    let merged_run = gc(
+        &spec,
+        &GcPolicy {
+            reap_merged: true,
+            ..GcPolicy::default()
+        },
+        &[],
+    )
+    .await
+    .expect("merged run");
+    assert_eq!(merged_run.removed.len(), 1, "{merged_run:?}");
+    assert!(!untracked_residue.exists());
+    assert!(tracked_dirty.exists());
+    assert!(unmerged.exists());
+
+    // Verify branch was deleted
+    let git = Git::new(&root).with_env(env());
+    assert!(
+        !git.show_ref("refs/heads/agent/untracked")
+            .await
+            .expect("show_ref")
+    );
+
+    // reap_merged combined with force still removes the tracked-dirty and unmerged ones
+    let forced_run = gc(
+        &spec,
+        &GcPolicy {
+            reap_merged: true,
+            force: true,
+            ..GcPolicy::default()
+        },
+        &[],
+    )
+    .await
+    .expect("forced run");
+    assert_eq!(forced_run.removed.len(), 2, "{forced_run:?}");
+    assert!(!tracked_dirty.exists());
+    assert!(!unmerged.exists());
+}

@@ -20,6 +20,9 @@ pub struct GcPolicy {
     pub dry_run: bool,
     /// Remove dirty worktrees and unmerged branches too.
     pub force: bool,
+    /// Remove a worktree whose branch is already merged into the base even when untracked or ignored
+    /// files make it dirty; tracked modifications and unmerged branches still require `force`.
+    pub reap_merged: bool,
     /// Only consider worktrees older than this many seconds.
     pub older_than_secs: Option<u64>,
 }
@@ -143,16 +146,36 @@ pub async fn gc(spec: &RepoSpec, policy: &GcPolicy, protect: &[PathBuf]) -> Resu
             continue;
         }
         let worktree_git = Git::new(&entry.path).with_env(spec.env.clone());
-        let dirty = !worktree_git.status().await?.is_empty();
         let merged = git.is_ancestor(&entry.branch, base_branch).await?;
-        if !policy.force && (dirty || !merged) {
-            let reason = if dirty {
-                "dirty worktree"
-            } else {
-                "branch is not merged into the base"
-            };
-            report.skipped.push((entry.path.clone(), reason.to_owned()));
-            continue;
+        if policy.force {
+            // Force removes dirty worktrees and unmerged branches.
+        } else if policy.reap_merged {
+            if !merged {
+                report.skipped.push((
+                    entry.path.clone(),
+                    "branch is not merged into the base".to_owned(),
+                ));
+                continue;
+            }
+            let tracked_dirty = !worktree_git.tracked_status().await?.is_empty();
+            if tracked_dirty {
+                report.skipped.push((
+                    entry.path.clone(),
+                    "tracked changes in the worktree".to_owned(),
+                ));
+                continue;
+            }
+        } else {
+            let dirty = !worktree_git.status().await?.is_empty();
+            if dirty || !merged {
+                let reason = if dirty {
+                    "dirty worktree"
+                } else {
+                    "branch is not merged into the base"
+                };
+                report.skipped.push((entry.path.clone(), reason.to_owned()));
+                continue;
+            }
         }
         if policy.dry_run {
             report.planned.push(entry);
