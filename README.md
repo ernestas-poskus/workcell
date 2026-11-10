@@ -19,7 +19,6 @@ remain conservative.
 | `instructions` | Bounded, root-confined reads of a checkout's instruction files |
 | `launch` | An argv template with per-argument placeholders, and the child-environment policy |
 | `verify` | Running declared commands with bounded capture and status parsing |
-| `fs` | Bounded reads and atomic/no-clobber writes |
 
 ## Runtime requirements
 

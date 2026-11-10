@@ -13,7 +13,7 @@
 //! | [`instructions`] | Bounded, root-confined reads of a checkout's instruction files |
 //! | [`launch`] | An argv template with per-argument placeholders, and the child-environment policy |
 //! | [`verify`] | Running declared commands with bounded capture, the check record, and the status parser |
-//! | [`fs`] | Bounded reads and atomic/no-clobber writes |
+//! | [`types`] | Validated paths, Git identities, process arguments, environment, limits, and operation labels |
 //!
 //! # Guarantees
 //!
@@ -35,11 +35,11 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod error;
-pub mod fs;
 pub mod gc;
 pub mod git;
 pub mod instructions;
 pub mod launch;
 pub mod process;
+pub mod types;
 pub mod verify;
 pub mod worktree;

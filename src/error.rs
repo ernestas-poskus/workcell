@@ -12,12 +12,12 @@ pub enum Error {
         /// What failed, and where.
         detail: String,
     },
-    /// A Git command failed.
-    #[error("{command} failed: {detail}")]
+    /// A Git operation failed.
+    #[error("{operation} failed: {detail}")]
     Git {
-        /// The command that failed, rendered without secrets.
-        command: String,
-        /// Its stderr tail or the underlying failure.
+        /// The logical operation that failed, rendered without secrets.
+        operation: crate::types::GitOperation,
+        /// Its libgit2 message or the underlying failure.
         detail: String,
     },
     /// A child process could not be started or did not behave.
@@ -51,9 +51,12 @@ impl Error {
 
     /// A failed Git command, with its rendered invocation.
     #[must_use]
-    pub fn git(command: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub fn git(
+        operation: impl Into<crate::types::GitOperation>,
+        detail: impl Into<String>,
+    ) -> Self {
         Error::Git {
-            command: command.into(),
+            operation: operation.into(),
             detail: detail.into(),
         }
     }

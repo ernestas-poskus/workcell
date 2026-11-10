@@ -3,13 +3,21 @@
 use std::path::Path;
 
 use workcell::instructions::{Bundle, InstructionSpec, load};
+use workcell::types::{ByteLimit, RelativePath};
 
 fn spec(files: &[&str], max_bytes: usize, max_file_bytes: usize) -> InstructionSpec {
     InstructionSpec {
-        files: files.iter().map(|file| (*file).to_owned()).collect(),
-        max_bytes,
-        max_file_bytes,
+        files: files
+            .iter()
+            .map(|file| RelativePath::new(*file).expect("a relative path"))
+            .collect(),
+        max_bytes: ByteLimit::new(max_bytes),
+        max_file_bytes: ByteLimit::new(max_file_bytes),
     }
+}
+
+fn paths(values: &[RelativePath]) -> Vec<String> {
+    values.iter().map(RelativePath::to_string).collect()
 }
 
 fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
@@ -34,9 +42,9 @@ async fn configured_files_load_in_order_under_their_configured_names() {
     assert!(bundle.configured());
     assert!(bundle.missing.is_empty() && bundle.omitted.is_empty());
     assert_eq!(bundle.files.len(), 2);
-    assert_eq!(bundle.files[0].path, "AGENTS.md");
+    assert_eq!(bundle.files[0].path.to_string(), "AGENTS.md");
     assert_eq!(bundle.files[0].body, "root rules\n");
-    assert_eq!(bundle.files[1].path, "nested/AGENTS.md");
+    assert_eq!(bundle.files[1].path.to_string(), "nested/AGENTS.md");
     assert_eq!(bundle.files[1].body, "nested rules\n");
     assert!(!bundle.total_truncated);
 }
@@ -50,23 +58,22 @@ async fn a_missing_file_is_reported_and_never_fatal() {
         &spec(&["missing.md", "AGENTS.md"], 1_024, 1_024),
     )
     .await;
-    assert_eq!(bundle.missing, vec!["missing.md".to_owned()]);
+    assert_eq!(paths(&bundle.missing), vec!["missing.md"]);
     assert_eq!(bundle.files.len(), 1);
 }
 
-#[tokio::test]
-async fn an_absolute_or_traversing_path_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
+#[test]
+fn an_absolute_or_traversing_configured_path_cannot_be_expressed() {
     for path in [
         "../secret.md",
         "/etc/passwd",
         "./AGENTS.md",
         "nested/../AGENTS.md",
     ] {
-        let bundle = load(dir.path(), &spec(&[path], 1_024, 1_024)).await;
-        assert!(bundle.files.is_empty(), "{path} loaded");
-        assert_eq!(bundle.missing, vec![path.to_owned()]);
-        assert_eq!(bundle.looked_for, vec![path.to_owned()]);
+        assert!(
+            RelativePath::new(path).is_err(),
+            "{path} must not reach the loader as a configured path"
+        );
     }
 }
 
@@ -79,7 +86,7 @@ async fn a_symlink_out_of_the_checkout_is_refused() {
     std::os::unix::fs::symlink(&secret, dir.path().join("AGENTS.md")).expect("symlink");
     let bundle = load(dir.path(), &spec(&["AGENTS.md"], 1_024, 1_024)).await;
     assert!(bundle.files.is_empty(), "{bundle:?}");
-    assert_eq!(bundle.missing, vec!["AGENTS.md".to_owned()]);
+    assert_eq!(paths(&bundle.missing), vec!["AGENTS.md"]);
 }
 
 #[cfg(unix)]
@@ -123,10 +130,12 @@ async fn a_file_beyond_the_total_cap_is_omitted() {
     write(dir.path(), "B.md", "abcdef\n");
     let mut bundle: Bundle = load(dir.path(), &spec(&["A.md", "B.md"], 8, 8)).await;
     assert_eq!(bundle.files.len(), 1);
-    assert_eq!(bundle.omitted, vec!["B.md".to_owned()]);
+    assert_eq!(paths(&bundle.omitted), vec!["B.md"]);
     assert!(bundle.total_truncated);
     // The field is public so a caller can render what happened.
-    bundle.looked_for.push("C.md".to_owned());
+    bundle
+        .looked_for
+        .push(RelativePath::new("C.md").expect("a relative path"));
     assert!(bundle.configured());
 }
 
@@ -134,11 +143,7 @@ async fn a_file_beyond_the_total_cap_is_omitted() {
 async fn duplicate_paths_collapse_to_one_section() {
     let dir = tempfile::tempdir().expect("tempdir");
     write(dir.path(), "AGENTS.md", "rules\n");
-    let bundle = load(
-        dir.path(),
-        &spec(&["AGENTS.md", " AGENTS.md "], 1_024, 1_024),
-    )
-    .await;
-    assert_eq!(bundle.looked_for, vec!["AGENTS.md"]);
+    let bundle = load(dir.path(), &spec(&["AGENTS.md", "AGENTS.md"], 1_024, 1_024)).await;
+    assert_eq!(paths(&bundle.looked_for), vec!["AGENTS.md"]);
     assert_eq!(bundle.files.len(), 1);
 }

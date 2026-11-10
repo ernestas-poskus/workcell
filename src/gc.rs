@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::error::Result;
 use crate::git::Git;
+use crate::types::{BranchName, RepoRoot, Revision, Seconds, WorktreePath};
 use crate::worktree::RepoSpec;
 
 /// What the caller asked the collector to do.
@@ -24,16 +25,16 @@ pub struct GcPolicy {
     /// files make it dirty; tracked modifications and unmerged branches still require `force`.
     pub reap_merged: bool,
     /// Only consider worktrees older than this many seconds.
-    pub older_than_secs: Option<u64>,
+    pub older_than_secs: Option<Seconds>,
 }
 
 /// One worktree the collector considered removing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcEntry {
     /// The worktree's path.
-    pub path: PathBuf,
+    pub path: WorktreePath,
     /// Its branch.
-    pub branch: String,
+    pub branch: BranchName,
 }
 
 /// What happened, and what was deliberately left alone.
@@ -44,7 +45,7 @@ pub struct GcReport {
     /// Entries a dry run would have removed.
     pub planned: Vec<GcEntry>,
     /// Paths left alone, with the reason.
-    pub skipped: Vec<(PathBuf, String)>,
+    pub skipped: Vec<(WorktreePath, String)>,
 }
 
 impl GcReport {
@@ -53,21 +54,13 @@ impl GcReport {
     pub fn render(&self, dry_run: bool) -> String {
         let mut out = String::new();
         for entry in &self.removed {
-            out.push_str(&format!(
-                "removed {} ({})\n",
-                entry.path.display(),
-                entry.branch
-            ));
+            out.push_str(&format!("removed {} ({})\n", entry.path, entry.branch));
         }
         for entry in &self.planned {
-            out.push_str(&format!(
-                "would remove {} ({})\n",
-                entry.path.display(),
-                entry.branch
-            ));
+            out.push_str(&format!("would remove {} ({})\n", entry.path, entry.branch));
         }
         for (path, reason) in &self.skipped {
-            out.push_str(&format!("skipped {}: {reason}\n", path.display()));
+            out.push_str(&format!("skipped {path}: {reason}\n"));
         }
         if self.removed.is_empty() && self.planned.is_empty() && self.skipped.is_empty() {
             out.push_str("no worktrees found\n");
@@ -95,74 +88,70 @@ pub fn under_root(root: &Path, configured_root: &Path, path: &Path) -> bool {
 /// # Errors
 ///
 /// Returns a Git failure when the repository cannot be read or a removal fails.
-pub async fn gc(spec: &RepoSpec, policy: &GcPolicy, protect: &[PathBuf]) -> Result<GcReport> {
-    let git = Git::new(&spec.root).with_env(spec.env.clone());
-    let root = tokio::fs::canonicalize(&spec.root)
+pub async fn gc(spec: &RepoSpec, policy: &GcPolicy, protect: &[WorktreePath]) -> Result<GcReport> {
+    let git = Git::new(spec.root.clone()).with_env(spec.env.clone());
+    let root = tokio::fs::canonicalize(spec.root.as_path())
         .await
-        .unwrap_or_else(|_| spec.root.clone());
-    let entries: Vec<GcEntry> = git
-        .list_worktrees()
-        .await?
-        .into_iter()
-        .filter_map(|entry| {
-            entry.branch.map(|branch| GcEntry {
-                path: entry.path,
-                branch,
-            })
-        })
-        .collect();
+        .unwrap_or_else(|_| spec.root.as_path().to_path_buf());
+    let listed = git.list_worktrees().await?;
 
     let mut protected: Vec<PathBuf> = Vec::with_capacity(protect.len());
     for path in protect {
-        protected.push(canonical_or_self(path).await);
+        protected.push(canonical_or_self(path.as_path()).await);
     }
 
     let mut report = GcReport::default();
-    let prefix = format!("{}/", spec.branch_prefix.trim_end_matches('/'));
-    let base_branch = spec.base_branch.trim();
-    for entry in entries {
-        if !under_root(&root, spec.worktree_root(), &entry.path) {
+    let prefix = format!("{}/", spec.branch_prefix.as_str());
+    let base_branch = spec.base_branch.as_str();
+    for entry in listed {
+        let Some(branch) = entry.branch else {
+            continue;
+        };
+        let path = entry.path;
+        if !under_root(&root, spec.worktree_root(), path.as_path()) {
             continue;
         }
-        if !entry.branch.starts_with(&prefix) {
-            report.skipped.push((
-                entry.path.clone(),
-                "branch prefix does not match".to_owned(),
-            ));
-            continue;
-        }
-        if protected.contains(&canonical_or_self(&entry.path).await) {
+        if !branch.as_str().starts_with(&prefix) {
             report
                 .skipped
-                .push((entry.path.clone(), "protected by the caller".to_owned()));
+                .push((path, "branch prefix does not match".to_owned()));
+            continue;
+        }
+        if protected.contains(&canonical_or_self(path.as_path()).await) {
+            report
+                .skipped
+                .push((path, "protected by the caller".to_owned()));
             continue;
         }
         if let Some(seconds) = policy.older_than_secs
-            && !older_than(&entry.path, seconds).await
+            && !older_than(path.as_path(), seconds.get()).await
         {
             report
                 .skipped
-                .push((entry.path.clone(), format!("younger than {seconds}s")));
+                .push((path.clone(), format!("younger than {}s", seconds.get())));
             continue;
         }
-        let worktree_git = Git::new(&entry.path).with_env(spec.env.clone());
-        let merged = git.is_ancestor(&entry.branch, base_branch).await?;
+        let worktree_git = Git::new(RepoRoot::new(path.as_path())?).with_env(spec.env.clone());
+        let merged = git
+            .is_ancestor(
+                &Revision::new(branch.as_str())?,
+                &Revision::new(base_branch)?,
+            )
+            .await?;
         if policy.force {
             // Force removes dirty worktrees and unmerged branches.
         } else if policy.reap_merged {
             if !merged {
-                report.skipped.push((
-                    entry.path.clone(),
-                    "branch is not merged into the base".to_owned(),
-                ));
+                report
+                    .skipped
+                    .push((path, "branch is not merged into the base".to_owned()));
                 continue;
             }
             let tracked_dirty = !worktree_git.tracked_status().await?.is_empty();
             if tracked_dirty {
-                report.skipped.push((
-                    entry.path.clone(),
-                    "tracked changes in the worktree".to_owned(),
-                ));
+                report
+                    .skipped
+                    .push((path, "tracked changes in the worktree".to_owned()));
                 continue;
             }
         } else {
@@ -173,17 +162,17 @@ pub async fn gc(spec: &RepoSpec, policy: &GcPolicy, protect: &[PathBuf]) -> Resu
                 } else {
                     "branch is not merged into the base"
                 };
-                report.skipped.push((entry.path.clone(), reason.to_owned()));
+                report.skipped.push((path, reason.to_owned()));
                 continue;
             }
         }
         if policy.dry_run {
-            report.planned.push(entry);
+            report.planned.push(GcEntry { path, branch });
             continue;
         }
-        git.worktree_remove(&entry.path).await?;
-        git.branch_delete(&entry.branch).await?;
-        report.removed.push(entry);
+        git.worktree_remove(&path).await?;
+        git.branch_delete(&branch).await?;
+        report.removed.push(GcEntry { path, branch });
     }
     let _ = git.worktree_prune().await;
     Ok(report)
@@ -247,8 +236,8 @@ mod tests {
     #[test]
     fn a_report_counts_what_it_did() {
         let entry = GcEntry {
-            path: PathBuf::from("/repo/.worktrees/one"),
-            branch: "agent/one".to_owned(),
+            path: WorktreePath::new("/repo/.worktrees/one").expect("path"),
+            branch: BranchName::new("agent/one").expect("branch"),
         };
         let planned = GcReport {
             planned: vec![entry.clone()],
@@ -261,7 +250,7 @@ mod tests {
         let removed = GcReport {
             removed: vec![entry],
             skipped: vec![(
-                PathBuf::from("/repo/.worktrees/two"),
+                WorktreePath::new("/repo/.worktrees/two").expect("path"),
                 "dirty worktree".to_owned(),
             )],
             ..GcReport::default()

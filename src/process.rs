@@ -20,8 +20,6 @@
 //! `kill_on_drop(true)`, so the process exits with the runtime even if the future is lost. The log
 //! stays behind either way.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +28,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, watch};
 
 use crate::error::{Error, Result};
+use crate::types::{
+    AbsolutePath, Arg, Argv, DurationMillis, Env, ExitCode, LogPath, ProcessId, Timeout,
+};
 
 /// The most log bytes one run may append, across stdout and stderr together.
 ///
@@ -49,13 +50,13 @@ pub const KILL_GRACE: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct ProcessSpec {
     /// The argv, already substituted.
-    pub argv: Vec<String>,
+    pub argv: Argv,
     /// The working directory.
-    pub cwd: PathBuf,
+    pub cwd: AbsolutePath,
     /// The environment, already decided by the caller.
-    pub env: BTreeMap<String, String>,
+    pub env: Env,
     /// Where stdout and stderr are appended in full.
-    pub log_path: PathBuf,
+    pub log_path: LogPath,
 }
 
 /// Run one child with bounded capture and no durable log.
@@ -63,17 +64,12 @@ pub struct ProcessSpec {
 /// [`run`] appends both streams to a log because a run's log is its evidence. A caller that needs
 /// only the bounded capture — a verification command, an availability check — gets a throwaway
 /// file under the platform temp directory, still bounded by [`MAX_LOG_BYTES`] and
-/// [`CAPTURE_MAX_BYTES`], removed before returning; [`Outcome::log_path`] is then empty.
+/// [`CAPTURE_MAX_BYTES`], removed before returning; [`Outcome::log_path`] is then absent.
 ///
 /// # Errors
 ///
 /// As [`run`]: a missing binary, an unusable log target, or a process that cannot be spawned.
-pub async fn capture(
-    argv: Vec<String>,
-    cwd: PathBuf,
-    env: BTreeMap<String, String>,
-    timeout: Duration,
-) -> Result<Outcome> {
+pub async fn capture(argv: Argv, cwd: AbsolutePath, env: Env, timeout: Timeout) -> Result<Outcome> {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
@@ -81,18 +77,15 @@ pub async fn capture(
         "workcell-capture-{}-{unique}.log",
         std::process::id()
     ));
-    let mut outcome = run(
-        ProcessSpec {
-            argv,
-            cwd,
-            env,
-            log_path: log_path.clone(),
-        },
-        timeout,
-    )
-    .await?;
+    let spec = ProcessSpec {
+        argv,
+        cwd,
+        env,
+        log_path: LogPath::new(log_path.clone())?,
+    };
+    let mut outcome = run(spec, timeout).await?;
     let _ = tokio::fs::remove_file(&log_path).await;
-    outcome.log_path = PathBuf::new();
+    outcome.log_path = None;
     Ok(outcome)
 }
 
@@ -100,7 +93,7 @@ pub async fn capture(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// The exit code, when the process exited normally.
-    pub exit_code: Option<i32>,
+    pub exit_code: Option<ExitCode>,
     /// Whether the timeout fired.
     pub timed_out: bool,
     /// Whether the child stopped producing bytes for the configured window.
@@ -111,17 +104,20 @@ pub struct Outcome {
     pub stdout: String,
     /// The captured stderr (bounded).
     pub stderr: String,
-    /// The log file the full streams were written to.
-    pub log_path: PathBuf,
+    /// The log file the full streams were written to; absent for a capture-only run.
+    pub log_path: Option<LogPath>,
     /// Wall-clock duration.
-    pub duration: Duration,
+    pub duration: DurationMillis,
 }
 
 impl Outcome {
     /// Whether the process exited zero and was not interrupted.
     #[must_use]
     pub fn succeeded(&self) -> bool {
-        !self.timed_out && !self.stalled && !self.interrupted && self.exit_code == Some(0)
+        !self.timed_out
+            && !self.stalled
+            && !self.interrupted
+            && self.exit_code == Some(ExitCode::new(0))
     }
 }
 
@@ -137,10 +133,10 @@ impl Outcome {
 /// cannot be created, or waiting for the child fails.
 pub async fn run_with_stall(
     spec: ProcessSpec,
-    timeout: Duration,
-    stall_timeout: Duration,
+    timeout: Timeout,
+    stall_timeout: Timeout,
     shutdown: &mut watch::Receiver<bool>,
-    on_spawn: Option<&(dyn Fn(u32) + Send + Sync)>,
+    on_spawn: Option<&(dyn Fn(ProcessId) + Send + Sync)>,
 ) -> Result<Outcome> {
     run_with_stall_on(
         spec,
@@ -160,10 +156,17 @@ pub async fn run_with_stall(
 ///
 /// Returns [`Error::Process`] when the argv is empty, the program cannot be started, the log file
 /// cannot be created, or waiting for the child fails.
-pub async fn run(spec: ProcessSpec, timeout: Duration) -> Result<Outcome> {
+pub async fn run(spec: ProcessSpec, timeout: Timeout) -> Result<Outcome> {
     // Keep the sender alive: a dropped sender is a shutdown request.
     let (_sender, mut shutdown) = watch::channel(false);
-    run_with_stall(spec, timeout, Duration::ZERO, &mut shutdown, None).await
+    run_with_stall(
+        spec,
+        timeout,
+        Timeout::new(Duration::ZERO),
+        &mut shutdown,
+        None,
+    )
+    .await
 }
 
 /// Run one child with `input` written to its stdin, to completion or its timeout.
@@ -179,13 +182,13 @@ pub async fn run(spec: ProcessSpec, timeout: Duration) -> Result<Outcome> {
 pub async fn run_with_input(
     spec: ProcessSpec,
     input: Vec<u8>,
-    timeout: Duration,
+    timeout: Timeout,
 ) -> Result<Outcome> {
     let (_sender, mut shutdown) = watch::channel(false);
     run_with_stall_on(
         spec,
         timeout,
-        Duration::ZERO,
+        Timeout::new(Duration::ZERO),
         &mut shutdown,
         None,
         Some(input),
@@ -222,20 +225,20 @@ impl StallClock for TokioStallClock {
 /// Run with an injected clock for stall detection.
 async fn run_with_stall_on(
     spec: ProcessSpec,
-    timeout: Duration,
-    stall_timeout: Duration,
+    timeout: Timeout,
+    stall_timeout: Timeout,
     shutdown: &mut watch::Receiver<bool>,
-    on_spawn: Option<&(dyn Fn(u32) + Send + Sync)>,
+    on_spawn: Option<&(dyn Fn(ProcessId) + Send + Sync)>,
     stdin: Option<Vec<u8>>,
     clock: Arc<dyn StallClock>,
 ) -> Result<Outcome> {
     let started = Instant::now();
-    if spec.argv.is_empty() {
+    let Some(program) = spec.argv.as_slice().first().cloned() else {
         return Err(Error::Process {
             detail: "the argv is empty; there is no process to start".to_owned(),
         });
-    }
-    if let Some(parent) = spec.log_path.parent() {
+    };
+    if let Some(parent) = spec.log_path.as_path().parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|error| Error::io(&parent.display().to_string(), error))?;
@@ -245,18 +248,18 @@ async fn run_with_stall_on(
     let log = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&spec.log_path)
+        .open(spec.log_path.as_path())
         .await
-        .map_err(|error| Error::io(&spec.log_path.display().to_string(), error))?;
+        .map_err(|error| Error::io(&spec.log_path.as_path().display().to_string(), error))?;
     let log = Arc::new(Mutex::new(log));
     let log_written = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    let mut command = Command::new(&spec.argv[0]);
+    let mut command = Command::new(program.as_str());
     command
-        .args(&spec.argv[1..])
-        .current_dir(&spec.cwd)
+        .args(spec.argv.as_slice().iter().skip(1).map(Arg::as_str))
+        .current_dir(spec.cwd.as_path())
         .env_clear()
-        .envs(&spec.env)
+        .envs(spec.env.to_strings())
         .stdin(if stdin.is_some() {
             std::process::Stdio::piped()
         } else {
@@ -278,12 +281,12 @@ async fn run_with_stall_on(
     let mut child = command.spawn().map_err(|error| Error::Process {
         detail: format!(
             "could not start `{}` in {}: {error}",
-            spec.argv[0],
-            spec.cwd.display()
+            program.as_str(),
+            spec.cwd
         ),
     })?;
     if let (Some(on_spawn), Some(pid)) = (on_spawn, child.id()) {
-        on_spawn(pid);
+        on_spawn(ProcessId::new(pid));
     }
     if let (Some(input), Some(mut child_stdin)) = (stdin, child.stdin.take()) {
         tokio::spawn(async move {
@@ -316,16 +319,16 @@ async fn run_with_stall_on(
 
     let finish = tokio::select! {
         status = child.wait() => Finish::Exited(status),
-        () = tokio::time::sleep(timeout) => Finish::TimedOut,
+        () = tokio::time::sleep(timeout.as_duration()) => Finish::TimedOut,
         () = shutdown_requested(shutdown) => Finish::Shutdown,
-        () = stalled(&*clock, &mut last_output, stall_timeout) => Finish::Stalled,
+        () = stalled(&*clock, &mut last_output, stall_timeout.as_duration()) => Finish::Stalled,
     };
 
     let is_stalled = matches!(finish, Finish::Stalled);
     let (exit_code, timed_out, interrupted) = match finish {
         Finish::Exited(status) => {
             let status = status.map_err(|error| Error::Process {
-                detail: format!("waiting for `{}` failed: {error}", spec.argv[0]),
+                detail: format!("waiting for `{}` failed: {error}", program.as_str()),
             })?;
             // A normal exit is not proof the run is over: `agent &` or a shell that backgrounds a
             // helper exits 0 while the group keeps running inside the caller. Reap the group
@@ -335,20 +338,20 @@ async fn run_with_stall_on(
             if let Some(pid) = group_pid
                 && group_alive(pid).await
             {
-                terminate(&mut child, &spec.argv[0], Some(pid)).await;
+                terminate(&mut child, program.as_str(), Some(pid)).await;
             }
-            (status.code(), false, false)
+            (status.code().map(ExitCode::new), false, false)
         }
         Finish::TimedOut => {
-            terminate(&mut child, &spec.argv[0], group_pid).await;
+            terminate(&mut child, program.as_str(), group_pid).await;
             (None, true, false)
         }
         Finish::Stalled => {
-            terminate(&mut child, &spec.argv[0], group_pid).await;
+            terminate(&mut child, program.as_str(), group_pid).await;
             (None, false, false)
         }
         Finish::Shutdown => {
-            terminate(&mut child, &spec.argv[0], group_pid).await;
+            terminate(&mut child, program.as_str(), group_pid).await;
             (None, false, true)
         }
     };
@@ -365,8 +368,8 @@ async fn run_with_stall_on(
         interrupted,
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        log_path: spec.log_path,
-        duration: started.elapsed(),
+        log_path: Some(spec.log_path),
+        duration: DurationMillis::from_duration(started.elapsed()),
     })
 }
 
@@ -551,12 +554,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn spec(argv: &[&str], dir: &std::path::Path) -> ProcessSpec {
+    fn spec(argv: &[&str], dir: &std::path::Path, log: std::path::PathBuf) -> ProcessSpec {
         ProcessSpec {
-            argv: argv.iter().map(|argument| (*argument).to_owned()).collect(),
-            cwd: dir.to_path_buf(),
-            env: BTreeMap::new(),
-            log_path: dir.join("run.log"),
+            argv: Argv::new(argv.iter().copied()).expect("argv"),
+            cwd: AbsolutePath::new(dir).expect("cwd"),
+            env: Env::empty(),
+            log_path: LogPath::new(log).expect("log path"),
         }
     }
 
@@ -706,14 +709,14 @@ mod tests {
 
         let script = "trap 'touch term-witness' TERM; touch started; while :; do sleep 1; done";
         let process = ProcessSpec {
-            argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
-            cwd: dir.path().to_path_buf(),
-            env: BTreeMap::new(),
-            log_path: log_path.clone(),
+            argv: Argv::new(["/bin/sh", "-c", script]).expect("argv"),
+            cwd: AbsolutePath::new(dir.path()).expect("cwd"),
+            env: Env::empty(),
+            log_path: LogPath::new(log_path.clone()).expect("log path"),
         };
 
-        let stall_timeout = Duration::from_secs(2);
-        let total_timeout = Duration::from_secs(30);
+        let stall_timeout = Timeout::new(Duration::from_secs(2));
+        let total_timeout = Timeout::new(Duration::from_secs(30));
         let clock_clone = Arc::clone(&clock);
 
         let handle = tokio::spawn(async move {
@@ -745,7 +748,7 @@ mod tests {
 
         // Advance the manual clock past the stall timeout.
         let advanced_at = Instant::now();
-        clock.advance(stall_timeout + Duration::from_secs(1));
+        clock.advance(stall_timeout.as_duration() + Duration::from_secs(1));
 
         // (b) Wait for the child's TERM trap to write `term-witness`.
         let wait_witness = async {
@@ -794,9 +797,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (_sender, mut shutdown) = channel();
         let error = run_with_stall(
-            spec(&[], dir.path()),
-            Duration::from_secs(1),
-            Duration::ZERO,
+            spec(&[], dir.path(), dir.path().join("run.log")),
+            Timeout::new(Duration::from_secs(1)),
+            Timeout::new(Duration::ZERO),
             &mut shutdown,
             None,
         )
@@ -815,20 +818,17 @@ mod tests {
         // One megabyte past the cap.
         let bytes = MAX_LOG_BYTES + 1024 * 1024;
         let process = ProcessSpec {
-            argv: vec![
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                format!("head -c {bytes} /dev/zero"),
-            ],
-            cwd: dir.path().to_path_buf(),
-            env: BTreeMap::new(),
-            log_path: log_path.clone(),
+            argv: Argv::new(["/bin/sh", "-c", &format!("head -c {bytes} /dev/zero")])
+                .expect("argv"),
+            cwd: AbsolutePath::new(dir.path()).expect("cwd"),
+            env: Env::empty(),
+            log_path: LogPath::new(log_path.clone()).expect("log path"),
         };
 
         let outcome = run_with_stall_on(
             process,
-            Duration::from_secs(60),
-            Duration::from_secs(10),
+            Timeout::new(Duration::from_secs(60)),
+            Timeout::new(Duration::from_secs(10)),
             &mut shutdown,
             None,
             None,
@@ -863,23 +863,23 @@ mod capture_tests {
     #[tokio::test]
     async fn capture_bounds_the_capture_and_leaves_no_log() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let args = vec![
+        let args = [
             "/bin/sh".to_owned(),
             "-c".to_owned(),
             format!("head -c {} /dev/zero", CAPTURE_MAX_BYTES + 1024 * 1024),
         ];
         let outcome = capture(
-            args,
-            dir.path().to_path_buf(),
-            BTreeMap::new(),
-            Duration::from_secs(30),
+            Argv::new(args).expect("argv"),
+            AbsolutePath::new(dir.path()).expect("cwd"),
+            Env::empty(),
+            Timeout::new(Duration::from_secs(30)),
         )
         .await
         .expect("capture");
         assert!(outcome.succeeded());
         assert_eq!(outcome.stdout.len(), CAPTURE_MAX_BYTES);
         assert!(
-            outcome.log_path.as_os_str().is_empty(),
+            outcome.log_path.is_none(),
             "a capture-only run keeps no log path: {:?}",
             outcome.log_path
         );
@@ -889,10 +889,10 @@ mod capture_tests {
     async fn capture_kills_the_group_on_timeout() {
         let dir = tempfile::tempdir().expect("tempdir");
         let outcome = capture(
-            vec!["/bin/sleep".to_owned(), "3600".to_owned()],
-            dir.path().to_path_buf(),
-            BTreeMap::new(),
-            Duration::from_millis(100),
+            Argv::new(["/bin/sleep", "3600"]).expect("argv"),
+            AbsolutePath::new(dir.path()).expect("cwd"),
+            Env::empty(),
+            Timeout::new(Duration::from_millis(100)),
         )
         .await
         .expect("capture");
@@ -909,14 +909,18 @@ mod stdin_tests {
     async fn input_reaches_the_child_and_the_pipe_closes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let spec = ProcessSpec {
-            argv: vec!["/bin/cat".to_owned()],
-            cwd: dir.path().to_path_buf(),
-            env: BTreeMap::new(),
-            log_path: dir.path().join("log"),
+            argv: Argv::new(["/bin/cat"]).expect("argv"),
+            cwd: AbsolutePath::new(dir.path()).expect("cwd"),
+            env: Env::empty(),
+            log_path: LogPath::new(dir.path().join("log")).expect("log path"),
         };
-        let outcome = run_with_input(spec, b"prompt body".to_vec(), Duration::from_secs(10))
-            .await
-            .expect("run");
+        let outcome = run_with_input(
+            spec,
+            b"prompt body".to_vec(),
+            Timeout::new(Duration::from_secs(10)),
+        )
+        .await
+        .expect("run");
         assert!(outcome.succeeded(), "{outcome:?}");
         assert!(
             outcome.stdout.contains("prompt body"),

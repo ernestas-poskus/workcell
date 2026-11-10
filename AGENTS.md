@@ -19,7 +19,7 @@ tracker, a model, a routing policy, a plan, a brief, a review workflow, or an ag
   tracker, a plan, a work request, a caller's workflow, or a consumer.
 - **No reverse dependency.** This crate never depends on a consumer.
 - **One nested workspace.** Keep it out of the parent workspace.
-- **Publishable, not published.** Keep it packageable and its public API compatible.
+- **Publishable, not published.** Keep it packageable. Public API compatibility is semver-based; a breaking 0.x change requires a minor bump and a changelog entry (0.3.0 is the typed-surface break).
 - **Async-first.** Filesystem work on the runtime uses Tokio's blocking pool; child processes use
   Tokio's process driver. Do not block an async path on `std::fs`/`std::process`.
 

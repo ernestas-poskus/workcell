@@ -1,108 +1,59 @@
 //! Garbage collection against real temporary repositories: dry run, protection, age, dirt,
 //! merge state, and `force`.
 
+mod support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use workcell::gc::{GcPolicy, gc, under_root};
 use workcell::git::Git;
+use workcell::types::{
+    BranchName, BranchPrefix, RelativePath, RemoteName, RepoRoot, Seconds, WorktreePath,
+    WorktreeRoot,
+};
 use workcell::worktree::RepoSpec;
 
 fn env() -> BTreeMap<String, String> {
     std::env::vars().collect()
 }
 
-fn git_at(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .unwrap_or_else(|error| panic!("git {args:?}: {error}"))
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let output = git_at(dir, args);
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn commit(dir: &Path, name: &str, body: &str) {
-    std::fs::write(dir.join(name), body).expect("write");
-    git(dir, &["add", name]);
-    git(
-        dir,
-        &[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@example.invalid",
-            "commit",
-            "-qm",
-            &format!("add {name}"),
-        ],
-    );
-}
-
 fn repo() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("checkout");
-    std::fs::create_dir_all(&root).expect("checkout");
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["config", "user.name", "t"]);
-    git(&root, &["config", "user.email", "t@example.invalid"]);
-    commit(&root, "README.md", "base\n");
+    support::init(&root);
+    support::configure_user(&root, "t", "t@example.invalid");
+    support::commit(&root, "README.md", "base\n");
     let remote = dir.path().join("remote.git");
-    let status = Command::new("git")
-        .args(["init", "-q", "--bare"])
-        .arg(&remote)
-        .status()
-        .expect("git init bare");
-    assert!(status.success());
-    git(
-        &root,
-        &["remote", "add", "origin", remote.to_str().expect("utf-8")],
-    );
-    git(&root, &["push", "-q", "-u", "origin", "main"]);
+    support::init_bare(&remote);
+    support::add_remote(&root, "origin", &remote);
+    support::push_branch(&root, "origin", "main");
     (dir, root)
 }
 
 fn spec(root: &Path) -> RepoSpec {
     RepoSpec {
-        root: root.to_path_buf(),
-        remote: "origin".to_owned(),
-        base_branch: "main".to_owned(),
-        worktree_root: PathBuf::from(".worktrees"),
-        branch_prefix: "agent".to_owned(),
+        root: RepoRoot::new(root).expect("repository root"),
+        remote: RemoteName::new("origin").expect("remote"),
+        base_branch: BranchName::new("main").expect("base branch"),
+        worktree_root: WorktreeRoot::new(".worktrees").expect("worktree root"),
+        branch_prefix: BranchPrefix::new("agent").expect("branch prefix"),
         require_clean_root: true,
-        env: env(),
+        env: env().into(),
     }
 }
 
 fn add_worktree(root: &Path, branch: &str, path: &Path, unmerged: bool) {
-    git(
-        root,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            branch,
-            path.to_str().expect("utf-8"),
-        ],
-    );
+    support::create_branch(root, branch, "main");
+    support::worktree_add(root, branch, path);
     if unmerged {
-        commit(path, "change.txt", "change\n");
+        support::commit(path, "change.txt", "change\n");
     }
 }
 
 fn skipped(report: &workcell::gc::GcReport, path: &Path) -> bool {
     report.skipped.iter().any(|(candidate, _)| {
-        std::fs::canonicalize(candidate).ok() == std::fs::canonicalize(path).ok()
+        std::fs::canonicalize(candidate.as_path()).ok() == std::fs::canonicalize(path).ok()
     })
 }
 
@@ -117,6 +68,7 @@ async fn gc_removes_only_safe_worktrees_and_protects_active_ones() {
     let protected = root.join(".worktrees/protected");
     let outside_prefix = root.join(".worktrees/other");
     let outside_root = dir.path().join("outside");
+    let protected_tree = WorktreePath::new(&protected).expect("protected path");
     add_worktree(&root, "agent/merged", &merged, false);
     add_worktree(&root, "agent/unmerged", &unmerged, true);
     add_worktree(&root, "agent/dirty", &dirty, false);
@@ -131,14 +83,14 @@ async fn gc_removes_only_safe_worktrees_and_protects_active_ones() {
             dry_run: true,
             ..GcPolicy::default()
         },
-        std::slice::from_ref(&protected),
+        std::slice::from_ref(&protected_tree),
     )
     .await
     .expect("dry run");
     assert!(dry.removed.is_empty());
     assert_eq!(dry.planned.len(), 1, "{dry:?}");
     assert_eq!(
-        std::fs::canonicalize(&dry.planned[0].path).expect("canon"),
+        std::fs::canonicalize(dry.planned[0].path.as_path()).expect("canon"),
         std::fs::canonicalize(&merged).expect("canon")
     );
     assert!(skipped(&dry, &unmerged), "{dry:?}");
@@ -154,7 +106,7 @@ async fn gc_removes_only_safe_worktrees_and_protects_active_ones() {
     let normal = gc(
         &spec,
         &GcPolicy::default(),
-        std::slice::from_ref(&protected),
+        std::slice::from_ref(&protected_tree),
     )
     .await
     .expect("gc");
@@ -168,7 +120,7 @@ async fn gc_removes_only_safe_worktrees_and_protects_active_ones() {
             force: true,
             ..GcPolicy::default()
         },
-        std::slice::from_ref(&protected),
+        std::slice::from_ref(&protected_tree),
     )
     .await
     .expect("forced gc");
@@ -193,7 +145,7 @@ async fn a_young_worktree_is_left_alone_until_the_age_threshold_passes() {
     let young = gc(
         &spec,
         &GcPolicy {
-            older_than_secs: Some(3_600),
+            older_than_secs: Some(Seconds::new(3_600)),
             ..GcPolicy::default()
         },
         &[],
@@ -207,7 +159,7 @@ async fn a_young_worktree_is_left_alone_until_the_age_threshold_passes() {
     let old_enough = gc(
         &spec,
         &GcPolicy {
-            older_than_secs: Some(0),
+            older_than_secs: Some(Seconds::new(0)),
             ..GcPolicy::default()
         },
         &[],
@@ -223,17 +175,24 @@ async fn the_report_and_the_worktree_list_agree_on_a_real_listing() {
     let (_dir, root) = repo();
     let path = root.join(".worktrees/agent-one");
     add_worktree(&root, "agent/one", &path, false);
-    let git = Git::new(&root).with_env(env());
+    let git = Git::new(RepoRoot::new(&root).expect("repository root")).with_env(env().into());
     let entries = git.list_worktrees().await.expect("list");
     assert!(
-        entries
-            .iter()
-            .any(|entry| entry.branch.as_deref() == Some("agent/one")),
+        entries.iter().any(|entry| entry
+            .branch
+            .as_ref()
+            .map(workcell::types::BranchName::as_str)
+            == Some("agent/one")),
         "{entries:?}"
     );
     assert!(under_root(&root, Path::new(".worktrees"), &path));
     for entry in entries {
-        if entry.branch.as_deref() == Some("agent/one") {
+        if entry
+            .branch
+            .as_ref()
+            .map(workcell::types::BranchName::as_str)
+            == Some("agent/one")
+        {
             assert_eq!(
                 std::fs::canonicalize(&entry.path).expect("canon"),
                 std::fs::canonicalize(&path).expect("canon")
@@ -245,7 +204,7 @@ async fn the_report_and_the_worktree_list_agree_on_a_real_listing() {
 #[tokio::test]
 async fn git_tracked_status_reports_tracked_edit_but_not_untracked_file() {
     let (_dir, root) = repo();
-    let git = Git::new(&root).with_env(env());
+    let git = Git::new(RepoRoot::new(&root).expect("repository root")).with_env(env().into());
 
     assert!(git.status().await.expect("status").is_empty());
     assert!(
@@ -256,7 +215,7 @@ async fn git_tracked_status_reports_tracked_edit_but_not_untracked_file() {
     );
 
     std::fs::write(root.join("untracked.txt"), "untracked\n").expect("write untracked");
-    let untracked_path = PathBuf::from("untracked.txt");
+    let untracked_path = RelativePath::new("untracked.txt").expect("relative path");
     assert_eq!(
         git.status().await.expect("status"),
         vec![untracked_path.clone()]
@@ -269,7 +228,7 @@ async fn git_tracked_status_reports_tracked_edit_but_not_untracked_file() {
     );
 
     std::fs::write(root.join("README.md"), "modified base\n").expect("write tracked");
-    let readme_path = PathBuf::from("README.md");
+    let readme_path = RelativePath::new("README.md").expect("relative path");
     assert_eq!(
         git.tracked_status().await.expect("tracked_status"),
         vec![readme_path.clone()]
@@ -339,7 +298,7 @@ async fn reap_merged_removes_clean_merged_worktrees_with_untracked_residue() {
     assert!(merged_dry.removed.is_empty());
     assert_eq!(merged_dry.planned.len(), 1, "{merged_dry:?}");
     assert_eq!(
-        std::fs::canonicalize(&merged_dry.planned[0].path).expect("canon"),
+        std::fs::canonicalize(merged_dry.planned[0].path.as_path()).expect("canon"),
         std::fs::canonicalize(&untracked_residue).expect("canon")
     );
     assert!(merged_dry.skipped.iter().any(|(p, r)| {
@@ -369,11 +328,13 @@ async fn reap_merged_removes_clean_merged_worktrees_with_untracked_residue() {
     assert!(unmerged.exists());
 
     // Verify branch was deleted
-    let git = Git::new(&root).with_env(env());
+    let git = Git::new(RepoRoot::new(&root).expect("repository root")).with_env(env().into());
     assert!(
-        !git.show_ref("refs/heads/agent/untracked")
-            .await
-            .expect("show_ref")
+        !git.show_ref(
+            &workcell::types::ReferenceName::new("refs/heads/agent/untracked").expect("reference")
+        )
+        .await
+        .expect("show_ref")
     );
 
     // reap_merged combined with force still removes the tracked-dirty and unmerged ones
