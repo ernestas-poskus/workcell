@@ -17,37 +17,44 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::types::{Arg, Argv, Env, EnvName};
+
 /// An argv template whose arguments may contain `{name}` placeholders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArgvTemplate {
-    arguments: Vec<String>,
+    arguments: Argv,
 }
 
 impl ArgvTemplate {
-    /// Build a template from its declared arguments.
+    /// Build a template from its declared, already-validated arguments.
     #[must_use]
-    pub fn new(arguments: impl IntoIterator<Item = String>) -> Self {
-        Self {
-            arguments: arguments.into_iter().collect(),
-        }
+    pub fn new(arguments: Argv) -> Self {
+        Self { arguments }
     }
 
     /// The declared arguments, unrendered.
     #[must_use]
-    pub fn arguments(&self) -> &[String] {
-        &self.arguments
+    pub fn arguments(&self) -> &[Arg] {
+        self.arguments.as_slice()
     }
 
     /// Render every argument with `values`.
     ///
     /// Each entry replaces `{name}` inside an argument; a value may itself contain braces. An
-    /// unknown placeholder is left in place.
+    /// unknown placeholder is left in place. A substituted value carrying NUL cannot be an argv
+    /// element, so such a template renders unsubstituted rather than shifting or dropping an
+    /// argument.
     #[must_use]
-    pub fn render(&self, values: &BTreeMap<&str, &str>) -> Vec<String> {
-        self.arguments
+    pub fn render(&self, values: &BTreeMap<&str, &str>) -> Argv {
+        let rendered = self
+            .arguments
+            .as_slice()
             .iter()
-            .map(|argument| render_argument(argument, values))
-            .collect()
+            .map(|argument| render_argument(argument.as_str(), values));
+        match Argv::new(rendered) {
+            Ok(argv) => argv,
+            Err(_) => self.arguments.clone(),
+        }
     }
 }
 
@@ -65,6 +72,20 @@ pub fn render_argument(argument: &str, values: &BTreeMap<&str, &str>) -> String 
     rendered
 }
 
+/// A case-insensitive name pattern a deny rule matches against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnvPattern(String);
+
+impl EnvPattern {
+    fn new(value: impl Into<String>) -> Self {
+        Self(value.into().to_ascii_uppercase())
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The child-environment deny rules a caller owns.
 ///
 /// Matching is ASCII-case-insensitive for prefixes, suffixes, and substrings; an exact name is
@@ -72,10 +93,10 @@ pub fn render_argument(argument: &str, values: &BTreeMap<&str, &str>) -> String 
 /// override, because the policy exists to fail closed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EnvPolicy {
-    deny_exact: BTreeSet<String>,
-    deny_prefixes: Vec<String>,
-    deny_suffixes: Vec<String>,
-    deny_contains: Vec<String>,
+    deny_exact: BTreeSet<EnvName>,
+    deny_prefixes: Vec<EnvPattern>,
+    deny_suffixes: Vec<EnvPattern>,
+    deny_contains: Vec<EnvPattern>,
 }
 
 impl EnvPolicy {
@@ -87,76 +108,83 @@ impl EnvPolicy {
 
     /// Deny a variable whose name is exactly `name` (case-sensitive, as the environment spells it).
     #[must_use]
-    pub fn deny_exact(mut self, name: impl Into<String>) -> Self {
-        self.deny_exact.insert(name.into());
+    pub fn deny_exact(mut self, name: EnvName) -> Self {
+        self.deny_exact.insert(name);
         self
     }
 
     /// Deny every variable whose name starts with `prefix`, case-insensitively.
     #[must_use]
     pub fn deny_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.deny_prefixes.push(prefix.into().to_ascii_uppercase());
+        self.deny_prefixes.push(EnvPattern::new(prefix));
         self
     }
 
     /// Deny every variable whose name ends with `suffix`, case-insensitively.
     #[must_use]
     pub fn deny_suffix(mut self, suffix: impl Into<String>) -> Self {
-        self.deny_suffixes.push(suffix.into().to_ascii_uppercase());
+        self.deny_suffixes.push(EnvPattern::new(suffix));
         self
     }
 
     /// Deny every variable whose name contains `needle`, case-insensitively.
     #[must_use]
     pub fn deny_contains(mut self, needle: impl Into<String>) -> Self {
-        self.deny_contains.push(needle.into().to_ascii_uppercase());
+        self.deny_contains.push(EnvPattern::new(needle));
         self
     }
 
-    /// Whether `key` survives the policy.
+    /// Whether `name` survives the policy.
     #[must_use]
-    pub fn allows(&self, key: &str) -> bool {
-        if self.deny_exact.contains(key) {
+    pub fn allows(&self, name: &EnvName) -> bool {
+        if self.deny_exact.contains(name) {
             return false;
         }
-        let upper = key.to_ascii_uppercase();
+        let upper = name.as_str().to_ascii_uppercase();
         !self
             .deny_prefixes
             .iter()
-            .any(|prefix| upper.starts_with(prefix))
+            .any(|prefix| upper.starts_with(prefix.as_str()))
             && !self
                 .deny_suffixes
                 .iter()
-                .any(|suffix| upper.ends_with(suffix))
+                .any(|suffix| upper.ends_with(suffix.as_str()))
             && !self
                 .deny_contains
                 .iter()
-                .any(|needle| upper.contains(needle))
+                .any(|needle| upper.contains(needle.as_str()))
     }
 
     /// Remove every denied variable from `env`.
     #[must_use]
-    pub fn scrub(&self, env: BTreeMap<String, String>) -> BTreeMap<String, String> {
-        env.into_iter()
-            .filter(|(key, _)| self.allows(key))
-            .collect()
+    pub fn scrub(&self, env: Env) -> Env {
+        let mut scrubbed = Env::empty();
+        for (name, value) in env.iter() {
+            if self.allows(name) {
+                scrubbed.insert(name.clone(), value.clone());
+            }
+        }
+        scrubbed
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EnvValue;
+
+    fn name(value: &str) -> EnvName {
+        EnvName::new(value).expect("env name")
+    }
 
     #[test]
     fn placeholders_are_substituted_inside_one_argument() {
         let values = BTreeMap::from([("prompt", "/tmp/a brief.md"), ("model", "m1")]);
-        let template = ArgvTemplate::new(vec![
-            "--prompt-file={prompt}".to_owned(),
-            "{model}".to_owned(),
-            "plain".to_owned(),
-        ]);
+        let template = ArgvTemplate::new(
+            Argv::new(["--prompt-file={prompt}", "{model}", "plain"]).expect("argv"),
+        );
         assert_eq!(
-            template.render(&values),
+            template.render(&values).to_strings(),
             vec!["--prompt-file=/tmp/a brief.md", "m1", "plain"]
         );
     }
@@ -179,29 +207,34 @@ mod tests {
     #[test]
     fn the_policy_denies_by_exact_name_prefix_suffix_and_substring() {
         let policy = EnvPolicy::new()
-            .deny_exact("CARGO_HOME")
+            .deny_exact(name("CARGO_HOME"))
             .deny_prefix("TRACKER_")
             .deny_suffix("_TOKEN")
             .deny_contains("API_KEY");
-        assert!(!policy.allows("CARGO_HOME"));
-        assert!(!policy.allows("tracker_secret"));
-        assert!(!policy.allows("MY_TOKEN"));
-        assert!(!policy.allows("OPENAI_API_KEY"));
-        assert!(policy.allows("PATH"));
-        assert!(policy.allows("CARGO_TARGET_DIR"));
+        assert!(!policy.allows(&name("CARGO_HOME")));
+        assert!(!policy.allows(&name("tracker_secret")));
+        assert!(!policy.allows(&name("MY_TOKEN")));
+        assert!(!policy.allows(&name("OPENAI_API_KEY")));
+        assert!(policy.allows(&name("PATH")));
+        assert!(policy.allows(&name("CARGO_TARGET_DIR")));
     }
 
     #[test]
     fn scrub_removes_only_the_denied_variables() {
         let policy = EnvPolicy::new().deny_suffix("_TOKEN");
-        let env = BTreeMap::from([
-            ("PATH".to_owned(), "/bin".to_owned()),
-            ("GH_TOKEN".to_owned(), "secret".to_owned()),
-            ("HOME".to_owned(), "/home/a".to_owned()),
-        ]);
+        let env = Env::new([
+            ("PATH", "/bin"),
+            ("GH_TOKEN", "secret"),
+            ("HOME", "/home/a"),
+        ])
+        .expect("env");
         let scrubbed = policy.scrub(env);
         assert_eq!(scrubbed.len(), 2);
-        assert!(scrubbed.contains_key("PATH"));
-        assert!(!scrubbed.contains_key("GH_TOKEN"));
+        assert_eq!(
+            scrubbed.get("PATH").map(EnvValue::as_str),
+            Some("/bin"),
+            "the allowed variable keeps its value"
+        );
+        assert!(!scrubbed.get("GH_TOKEN").is_some_and(|_| true));
     }
 }

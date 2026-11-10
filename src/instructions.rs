@@ -6,34 +6,36 @@
 //! symlink cannot pull a host secret into a model prompt. Files are capped per file and in total,
 //! truncated on a UTF-8 character boundary, and a missing file is reported rather than fatal.
 //!
-//! The read is deliberately conservative in the same way the rest of the crate is: unsafe
-//! spellings (an absolute path, a parent traversal, a `.` component) are refused even though the
-//! loader that normally supplies the list validates them, because the loader is public.
+//! The read is deliberately conservative in the same way the rest of the crate is: a
+//! [`RelativePath`] cannot spell an absolute path, a parent traversal, or a `.` component, so the
+//! loader cannot be handed a path that escapes its root even when it is called directly.
 
-use std::path::{Component, Path};
+use std::path::Path;
 
 use tokio::io::AsyncReadExt;
+
+use crate::types::{ByteLimit, ByteSize, RelativePath};
 
 /// How to read the checkout's instruction files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstructionSpec {
     /// The configured paths, relative to the checkout root.
-    pub files: Vec<String>,
+    pub files: Vec<RelativePath>,
     /// Per-file byte cap.
-    pub max_file_bytes: usize,
+    pub max_file_bytes: ByteLimit,
     /// Total byte cap.
-    pub max_bytes: usize,
+    pub max_bytes: ByteLimit,
 }
 
 /// One instruction file as a prompt will render it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstructionFile {
     /// The configured path, exactly as the prompt should name it.
-    pub path: String,
+    pub path: RelativePath,
     /// The (possibly truncated) UTF-8 body.
     pub body: String,
     /// The file's size before any cap was applied.
-    pub original_bytes: u64,
+    pub original_bytes: ByteSize,
     /// Whether the per-file or total cap shortened this body.
     pub truncated: bool,
 }
@@ -42,13 +44,13 @@ pub struct InstructionFile {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Bundle {
     /// The configured paths, in order, whether or not each one loaded.
-    pub looked_for: Vec<String>,
+    pub looked_for: Vec<RelativePath>,
     /// The files that loaded, in configured order.
     pub files: Vec<InstructionFile>,
     /// The configured paths that could not be read safely.
-    pub missing: Vec<String>,
+    pub missing: Vec<RelativePath>,
     /// The configured paths the total cap left no room for.
-    pub omitted: Vec<String>,
+    pub omitted: Vec<RelativePath>,
     /// Whether the total cap cut a file short or omitted one.
     pub total_truncated: bool,
 }
@@ -67,24 +69,16 @@ impl Bundle {
 #[must_use]
 pub async fn load(root: &Path, spec: &InstructionSpec) -> Bundle {
     let mut seen = std::collections::HashSet::new();
-    let mut looked_for: Vec<String> = Vec::new();
+    let mut looked_for: Vec<RelativePath> = Vec::new();
     for configured in &spec.files {
-        let path = configured.trim();
-        let relative = Path::new(path);
-        // Unsafe spellings must still reach read_one and be reported missing.
-        let safe = !relative.is_absolute()
-            && relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)));
-        let key = if safe {
-            tokio::fs::canonicalize(root.join(relative))
-                .await
-                .unwrap_or_else(|_| root.join(relative))
-        } else {
-            root.join(relative)
-        };
-        if seen.insert((safe, key)) {
-            looked_for.push(path.to_owned());
+        let relative = configured.as_path();
+        // A resolved path is the dedup key: two configured spellings can name one file (a
+        // symlink, a nested alias). A path that does not resolve keeps its joined form.
+        let key = tokio::fs::canonicalize(root.join(relative))
+            .await
+            .unwrap_or_else(|_| root.join(relative));
+        if seen.insert(key) {
+            looked_for.push(configured.clone());
         }
     }
     if looked_for.is_empty() {
@@ -99,7 +93,7 @@ pub async fn load(root: &Path, spec: &InstructionSpec) -> Bundle {
     let mut total_truncated = false;
 
     for configured in &looked_for {
-        if used >= spec.max_bytes {
+        if used >= spec.max_bytes.get() {
             omitted.push(configured.clone());
             total_truncated = true;
             continue;
@@ -130,16 +124,17 @@ pub async fn load(root: &Path, spec: &InstructionSpec) -> Bundle {
 async fn read_one(
     root: &Path,
     canonical_root: Option<&Path>,
-    configured: &str,
+    configured: &RelativePath,
     spec: &InstructionSpec,
     used: usize,
 ) -> Result<(InstructionFile, usize, bool), ()> {
-    // Defence in depth: the configuration loader validates these, but the loader is public.
-    let relative = Path::new(configured);
+    // Defence in depth for a caller that bypasses the type: the loader still refuses a spelling
+    // that is not a plain relative path.
+    let relative = configured.as_path();
     if relative.is_absolute()
         || relative
             .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         return Err(());
     }
@@ -157,11 +152,13 @@ async fn read_one(
     }
 
     let original_bytes = metadata.len();
-    let remaining = spec.max_bytes.saturating_sub(used);
+    let max_bytes = spec.max_bytes.get();
+    let max_file_bytes = spec.max_file_bytes.get();
+    let remaining = max_bytes.saturating_sub(used);
     if remaining == 0 {
         return Err(());
     }
-    let cap = spec.max_file_bytes.min(remaining);
+    let cap = max_file_bytes.min(remaining);
     let mut raw = Vec::new();
     tokio::fs::File::open(&canonical)
         .await
@@ -177,13 +174,13 @@ async fn read_one(
     let truncated = !read_all || cut_at_boundary || (original_bytes as usize) > consumed;
     // The total cap is the limiting factor only when it is below the per-file cap (otherwise the
     // per-file cap would have shortened the file anyway).
-    let total_cut = (original_bytes as usize) > remaining && remaining < spec.max_file_bytes;
+    let total_cut = (original_bytes as usize) > remaining && remaining < max_file_bytes;
 
     Ok((
         InstructionFile {
-            path: configured.to_owned(),
+            path: configured.clone(),
             body: text,
-            original_bytes,
+            original_bytes: ByteSize::new(original_bytes),
             truncated,
         },
         consumed,
@@ -218,9 +215,26 @@ mod tests {
 
     fn spec(files: &[&str], max_bytes: usize, max_file_bytes: usize) -> InstructionSpec {
         InstructionSpec {
-            files: files.iter().map(|file| (*file).to_owned()).collect(),
-            max_bytes,
-            max_file_bytes,
+            files: files
+                .iter()
+                .map(|file| RelativePath::new(*file).expect("a relative path"))
+                .collect(),
+            max_bytes: ByteLimit::new(max_bytes),
+            max_file_bytes: ByteLimit::new(max_file_bytes),
+        }
+    }
+
+    fn paths(values: &[RelativePath]) -> Vec<String> {
+        values.iter().map(RelativePath::to_string).collect()
+    }
+
+    #[test]
+    fn an_unsafe_configured_path_cannot_be_expressed() {
+        for path in ["../outside.md", "/etc/passwd", "./inside.md"] {
+            assert!(
+                RelativePath::new(path).is_err(),
+                "{path} must not be a relative path the spec can carry"
+            );
         }
     }
 
@@ -234,22 +248,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn surrounding_whitespace_in_a_configured_path_is_ignored() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        write(dir.path(), "AGENTS.md", "rules  \n\n");
-        let single = load(dir.path(), &spec(&["AGENTS.md"], 1024, 1024)).await;
-        let padded = load(dir.path(), &spec(&[" \tAGENTS.md\r\n"], 1024, 1024)).await;
-        assert_eq!(padded, single);
-        assert_eq!(padded.files[0].body, "rules  \n\n");
-    }
-
-    #[tokio::test]
-    async fn configured_paths_are_trimmed_and_duplicates_do_not_consume_budget() {
+    async fn configured_paths_are_kept_and_duplicates_do_not_consume_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
         write(dir.path(), "A.md", "aaa");
         write(dir.path(), "B.md", "bbb");
-        let bundle = load(dir.path(), &spec(&[" A.md ", "A.md", "B.md"], 6, 6)).await;
-        assert_eq!(bundle.looked_for, vec!["A.md", "B.md"]);
+        let bundle = load(dir.path(), &spec(&["A.md", "A.md", "B.md"], 6, 6)).await;
+        assert_eq!(paths(&bundle.looked_for), vec!["A.md", "B.md"]);
         assert_eq!(bundle.files.len(), 2);
         assert_eq!(bundle.files[1].body, "bbb");
         assert!(!bundle.total_truncated);
@@ -268,10 +272,10 @@ mod tests {
             &spec(&["missing.md", "A.md", "alias.md"], 1024, 1024),
         )
         .await;
-        assert_eq!(bundle.missing, vec!["missing.md"]);
+        assert_eq!(paths(&bundle.missing), vec!["missing.md"]);
         #[cfg(unix)]
         assert_eq!(bundle.files.len(), 1);
-        assert_eq!(bundle.files[0].path, "A.md");
+        assert_eq!(bundle.files[0].path.to_string(), "A.md");
     }
 
     #[tokio::test]
@@ -287,9 +291,9 @@ mod tests {
         assert_eq!(bundle.looked_for.len(), 2);
         assert!(bundle.missing.is_empty());
         assert_eq!(bundle.files.len(), 2);
-        assert_eq!(bundle.files[0].path, "AGENTS.md");
+        assert_eq!(bundle.files[0].path.to_string(), "AGENTS.md");
         assert_eq!(bundle.files[0].body, "root rules\n");
-        assert_eq!(bundle.files[1].path, "crate/AGENTS.md");
+        assert_eq!(bundle.files[1].path.to_string(), "crate/AGENTS.md");
         assert_eq!(bundle.files[1].body, "crate rules\n");
         assert!(!bundle.total_truncated);
     }
@@ -300,7 +304,7 @@ mod tests {
         write(dir.path(), "AGENTS.md", "root rules\n");
         let bundle = load(dir.path(), &spec(&["AGENTS.md", "missing.md"], 1024, 1024)).await;
         assert_eq!(bundle.files.len(), 1);
-        assert_eq!(bundle.missing, vec!["missing.md".to_owned()]);
+        assert_eq!(paths(&bundle.missing), vec!["missing.md"]);
     }
 
     #[tokio::test]
@@ -309,16 +313,6 @@ mod tests {
         let bundle = load(dir.path(), &spec(&[], 1024, 1024)).await;
         assert!(!bundle.configured());
         assert!(bundle.files.is_empty());
-    }
-
-    #[tokio::test]
-    async fn unsafe_paths_are_refused_even_when_the_loader_is_called_directly() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for path in ["../outside.md", "/etc/passwd", "./inside.md"] {
-            let bundle = load(dir.path(), &spec(&[path], 1024, 1024)).await;
-            assert!(bundle.files.is_empty(), "{path} must not load");
-            assert_eq!(bundle.missing, vec![path.to_owned()]);
-        }
     }
 
     #[tokio::test]
@@ -334,7 +328,7 @@ mod tests {
         #[cfg(unix)]
         {
             assert!(bundle.files.is_empty());
-            assert_eq!(bundle.missing, vec!["AGENTS.md".to_owned()]);
+            assert_eq!(paths(&bundle.missing), vec!["AGENTS.md"]);
         }
         #[cfg(not(unix))]
         {

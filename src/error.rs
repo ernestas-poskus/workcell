@@ -12,33 +12,18 @@ pub enum Error {
         /// What failed, and where.
         detail: String,
     },
-    /// A Git command failed.
-    #[error("{command} failed: {detail}")]
+    /// A Git operation failed.
+    #[error("{operation} failed: {detail}")]
     Git {
-        /// The command that failed, rendered without secrets.
-        command: String,
-        /// Its stderr tail or the underlying failure.
+        /// The logical operation that failed, rendered without secrets.
+        operation: crate::types::GitOperation,
+        /// Its libgit2 message or the underlying failure.
         detail: String,
     },
     /// A child process could not be started or did not behave.
     #[error("process: {detail}")]
     Process {
         /// What happened.
-        detail: String,
-    },
-    /// The sandbox is missing, unsupported on this host, or refused to start.
-    #[error("sandbox: {detail}")]
-    Sandbox {
-        /// What happened.
-        detail: String,
-    },
-    /// The sandbox cannot initialize because this process is already inside one.
-    ///
-    /// This is a distinct condition from a missing or unsupported sandbox: no configuration or
-    /// retry can fix it, and the operator must run the caller from a plain host shell.
-    #[error("nested sandbox: {detail}")]
-    NestedSandbox {
-        /// What failed, and the remediation.
         detail: String,
     },
     /// The caller's configuration cannot mean what it says.
@@ -66,9 +51,12 @@ impl Error {
 
     /// A failed Git command, with its rendered invocation.
     #[must_use]
-    pub fn git(command: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub fn git(
+        operation: impl Into<crate::types::GitOperation>,
+        detail: impl Into<String>,
+    ) -> Self {
         Error::Git {
-            command: command.into(),
+            operation: operation.into(),
             detail: detail.into(),
         }
     }

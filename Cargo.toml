@@ -1,14 +1,14 @@
 [package]
 name = "workcell"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
-description = "A sandboxed, git-backed workspace for running untrusted coding agents."
+description = "A git-backed workspace for running coding agents."
 repository = "https://github.com/ernestas-poskus/workcell"
 documentation = "https://docs.rs/workcell"
 readme = "README.md"
-keywords = ["agent", "sandbox", "git", "worktree", "process"]
+keywords = ["agent", "git", "worktree", "process"]
 categories = ["development-tools", "filesystem"]
 
 # Its own workspace: the crate is domain-agnostic and is meant to stand alone (its own

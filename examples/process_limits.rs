@@ -9,32 +9,41 @@
 //! (`SIGTERM`, a short grace period, then `SIGKILL`). A coding agent routinely starts children of
 //! its own, so the group kill is what stops a `command &` from outliving the run.
 //!
-//! No sandbox is involved here: this example demonstrates the process layer on its own.
+//! This example demonstrates the process layer on its own.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use workcell::process::{self, ProcessSpec};
+use workcell::types::{AbsolutePath, Argv, Env, LogPath, Timeout};
+
+fn spec(
+    argv: [&str; 3],
+    cwd: &AbsolutePath,
+    log: &LogPath,
+) -> Result<ProcessSpec, Box<dyn std::error::Error>> {
+    Ok(ProcessSpec {
+        argv: Argv::new(argv)?,
+        cwd: cwd.clone(),
+        env: Env::empty(),
+        log_path: log.clone(),
+    })
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_dir =
         std::env::temp_dir().join(format!("workcell-process-example-{}", std::process::id()));
     tokio::fs::create_dir_all(&log_dir).await?;
+    let cwd = AbsolutePath::new(log_dir.clone())?;
 
     // 1. A child that finishes normally: bounded stdout, and the full stream in the log file.
     let ok = process::run(
-        ProcessSpec {
-            argv: vec![
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                "printf 'hello'; printf 'world' >&2".to_owned(),
-            ],
-            cwd: log_dir.clone(),
-            env: BTreeMap::new(),
-            log_path: log_dir.join("ok.log"),
-        },
-        Duration::from_secs(10),
+        spec(
+            ["/bin/sh", "-c", "printf 'hello'; printf 'world' >&2"],
+            &cwd,
+            &LogPath::new(log_dir.join("ok.log"))?,
+        )?,
+        Timeout::new(Duration::from_secs(10)),
     )
     .await?;
     println!(
@@ -47,13 +56,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. A child that never finishes: the timeout fires, the process group is killed, and the
     //    outcome says so instead of pretending the child exited.
     let timed_out = process::run(
-        ProcessSpec {
-            argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 60".to_owned()],
-            cwd: log_dir.clone(),
-            env: BTreeMap::new(),
-            log_path: log_dir.join("timeout.log"),
-        },
-        Duration::from_millis(250),
+        spec(
+            ["/bin/sh", "-c", "sleep 60"],
+            &cwd,
+            &LogPath::new(log_dir.join("timeout.log"))?,
+        )?,
+        Timeout::new(Duration::from_millis(250)),
     )
     .await?;
     println!(
@@ -67,17 +75,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. A child that spawns a background grandchild: the group kill reaps the whole tree, so the
     //    run cannot leave a process behind.
     let group = process::run(
-        ProcessSpec {
-            argv: vec![
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                "sleep 60 & echo started".to_owned(),
-            ],
-            cwd: log_dir.clone(),
-            env: BTreeMap::new(),
-            log_path: log_dir.join("group.log"),
-        },
-        Duration::from_secs(10),
+        spec(
+            ["/bin/sh", "-c", "sleep 60 & echo started"],
+            &cwd,
+            &LogPath::new(log_dir.join("group.log"))?,
+        )?,
+        Timeout::new(Duration::from_secs(10)),
     )
     .await?;
     println!(

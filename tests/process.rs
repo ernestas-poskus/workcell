@@ -10,8 +10,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 use workcell::error::Error;
 use workcell::process::{self, CAPTURE_MAX_BYTES, KILL_GRACE, ProcessSpec};
+use workcell::types::{AbsolutePath, Argv, Env, ExitCode, LogPath, ProcessId, Timeout};
 
-fn env(path: bool) -> BTreeMap<String, String> {
+fn env(path: bool) -> Env {
     let mut env = BTreeMap::new();
     if path {
         env.insert(
@@ -19,15 +20,15 @@ fn env(path: bool) -> BTreeMap<String, String> {
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned()),
         );
     }
-    env
+    env.into()
 }
 
 fn spec(argv: &[&str], dir: &Path, log: PathBuf) -> ProcessSpec {
     ProcessSpec {
-        argv: argv.iter().map(|argument| (*argument).to_owned()).collect(),
-        cwd: dir.to_path_buf(),
+        argv: Argv::new(argv.iter().copied()).expect("argv"),
+        cwd: AbsolutePath::new(dir).expect("cwd"),
         env: env(true),
-        log_path: log,
+        log_path: LogPath::new(log).expect("log path"),
     }
 }
 
@@ -41,16 +42,19 @@ async fn a_zero_exit_captures_both_streams_and_the_log_keeps_them() {
             dir.path(),
             log.clone(),
         ),
-        Duration::from_secs(10),
+        Timeout::new(Duration::from_secs(10)),
     )
     .await
     .expect("runs");
     assert!(outcome.succeeded(), "{outcome:?}");
-    assert_eq!(outcome.exit_code, Some(0));
+    assert_eq!(outcome.exit_code, Some(ExitCode::new(0)));
     assert!(!outcome.timed_out && !outcome.stalled && !outcome.interrupted);
     assert_eq!(outcome.stdout, "out");
     assert_eq!(outcome.stderr, "err");
-    assert_eq!(outcome.log_path, log);
+    assert_eq!(
+        outcome.log_path.as_ref().map(LogPath::as_path),
+        Some(log.as_path())
+    );
     let written = std::fs::read_to_string(&log).expect("log");
     assert!(
         written.contains("out") && written.contains("err"),
@@ -67,31 +71,27 @@ async fn a_non_zero_exit_is_reported_with_its_code() {
             dir.path(),
             dir.path().join("run.log"),
         ),
-        Duration::from_secs(10),
+        Timeout::new(Duration::from_secs(10)),
     )
     .await
     .expect("runs");
-    assert_eq!(outcome.exit_code, Some(7));
+    assert_eq!(outcome.exit_code, Some(ExitCode::new(7)));
     assert!(!outcome.succeeded());
 }
 
 #[tokio::test]
 async fn only_the_supplied_environment_reaches_the_child() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut child_env = BTreeMap::new();
-    child_env.insert("PROBE".to_owned(), "value".to_owned());
-    child_env.insert(
-        "PATH".to_owned(),
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned()),
-    );
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_owned());
+    let child_env = Env::new([("PROBE", "value"), ("PATH", path.as_str())]).expect("env");
     let outcome = process::run(
         ProcessSpec {
-            argv: vec!["/usr/bin/env".to_owned()],
-            cwd: dir.path().to_path_buf(),
+            argv: Argv::new(["/usr/bin/env"]).expect("argv"),
+            cwd: AbsolutePath::new(dir.path()).expect("cwd"),
             env: child_env,
-            log_path: dir.path().join("run.log"),
+            log_path: LogPath::new(dir.path().join("run.log")).expect("log path"),
         },
-        Duration::from_secs(10),
+        Timeout::new(Duration::from_secs(10)),
     )
     .await
     .expect("runs");
@@ -123,7 +123,7 @@ async fn a_timeout_signals_the_whole_group_and_the_descendants_do_not_survive() 
             dir.path(),
             dir.path().join("run.log"),
         ),
-        Duration::from_millis(300),
+        Timeout::new(Duration::from_millis(300)),
     )
     .await
     .expect("runs");
@@ -155,13 +155,13 @@ async fn a_normal_exit_also_reaps_a_background_descendant() {
                 "/bin/sh",
                 "-c",
                 // The leader exits 0 immediately; its background child would touch `survived`
-                // one second later, inside the sandbox, after the caller's guard ran.
+                // one second later, inside the caller, after the caller's guard ran.
                 "(sleep 1; touch survived) & exit 0",
             ],
             dir.path(),
             dir.path().join("run.log"),
         ),
-        Duration::from_secs(10),
+        Timeout::new(Duration::from_secs(10)),
     )
     .await
     .expect("runs");
@@ -187,8 +187,8 @@ async fn a_silent_child_is_reaped_by_the_stall_watchdog() {
             dir.path(),
             dir.path().join("run.log"),
         ),
-        Duration::from_secs(20),
-        Duration::from_millis(300),
+        Timeout::new(Duration::from_secs(20)),
+        Timeout::new(Duration::from_millis(300)),
         &mut shutdown,
         None,
     )
@@ -218,7 +218,7 @@ async fn the_capture_is_bounded_while_the_log_keeps_everything() {
             dir.path(),
             log.clone(),
         ),
-        Duration::from_secs(30),
+        Timeout::new(Duration::from_secs(30)),
     )
     .await
     .expect("runs");
@@ -246,8 +246,8 @@ async fn a_shutdown_signal_interrupts_a_running_child() {
             dir.path(),
             dir.path().join("run.log"),
         ),
-        Duration::from_secs(60),
-        Duration::ZERO,
+        Timeout::new(Duration::from_secs(60)),
+        Timeout::new(Duration::ZERO),
         &mut shutdown,
         None,
     )
@@ -264,15 +264,15 @@ async fn the_spawn_callback_sees_the_child_pid() {
     let (_sender, mut shutdown) = watch::channel(false);
     let pid = Arc::new(AtomicU32::new(0));
     let seen = Arc::clone(&pid);
-    let on_spawn = move |value: u32| seen.store(value, Ordering::SeqCst);
+    let on_spawn = move |value: ProcessId| seen.store(value.get(), Ordering::SeqCst);
     let outcome = process::run_with_stall(
         spec(
             &["/bin/sh", "-c", "exit 0"],
             dir.path(),
             dir.path().join("run.log"),
         ),
-        Duration::from_secs(10),
-        Duration::ZERO,
+        Timeout::new(Duration::from_secs(10)),
+        Timeout::new(Duration::ZERO),
         &mut shutdown,
         Some(&on_spawn),
     )
@@ -291,7 +291,7 @@ async fn an_unstartable_program_is_a_process_error_not_a_panic() {
             dir.path(),
             dir.path().join("run.log"),
         ),
-        Duration::from_secs(1),
+        Timeout::new(Duration::from_secs(1)),
     )
     .await
     .expect_err("cannot start");
@@ -302,9 +302,12 @@ async fn an_unstartable_program_is_a_process_error_not_a_panic() {
 async fn an_empty_argv_is_refused_before_a_log_is_created() {
     let dir = tempfile::tempdir().expect("tempdir");
     let log = dir.path().join("run.log");
-    let error = process::run(spec(&[], dir.path(), log.clone()), Duration::from_secs(1))
-        .await
-        .expect_err("nothing to start");
+    let error = process::run(
+        spec(&[], dir.path(), log.clone()),
+        Timeout::new(Duration::from_secs(1)),
+    )
+    .await
+    .expect_err("nothing to start");
     assert!(matches!(error, Error::Process { .. }), "{error}");
     assert!(
         !log.exists(),
